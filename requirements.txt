@@ -1,9 +1,27 @@
+# ── Core scientific stack ────────────────────────────────────────────────
 numpy
 scipy
 torch
+
+# ── HuggingFace ──────────────────────────────────────────────────────────
 huggingface_hub
 transformers
 safetensors
+accelerate
+
+# ── EEG / signal processing ──────────────────────────────────────────────
 mne
+
+# ── Video / image ────────────────────────────────────────────────────────
 opencv-python
+
+# ── Transitive deps from the cloned model repos ─────────────────────────
+# (BioFoundation, NeuroLM, STEEGFormer, REVE remote code)
 timm
+einops
+pyyaml
+tqdm
+ftfy
+regex
+tiktoken
+sentencepiece
