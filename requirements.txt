@@ -1,6 +1,8 @@
 # ── Core scientific stack ────────────────────────────────────────────────
-numpy
-scipy
+# scipy>=1.11 and numpy>=1.26 are needed for prebuilt Python 3.12 wheels —
+# older versions fall back to a source build that requires gfortran.
+numpy>=1.26
+scipy>=1.11
 torch
 
 # ── HuggingFace ──────────────────────────────────────────────────────────
