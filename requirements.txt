@@ -1,0 +1,8 @@
+numpy
+scipy
+torch
+huggingface_hub
+transformers
+safetensors
+mne
+opencv-python

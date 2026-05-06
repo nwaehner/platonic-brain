@@ -4,6 +4,8 @@
 
 !.gitignore
 !README.md
+!requirements.txt
+!setup.sh
 !extract_femba.py
 !extract_luna.py
 !extract_neurolm.py
