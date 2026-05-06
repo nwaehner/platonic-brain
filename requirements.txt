@@ -13,12 +13,14 @@ accelerate
 
 # ── EEG / signal processing ──────────────────────────────────────────────
 mne
+mne-connectivity
+wfdb
 
 # ── Video / image ────────────────────────────────────────────────────────
 opencv-python
 
-# ── Transitive deps from the cloned model repos ─────────────────────────
-# (BioFoundation, NeuroLM, STEEGFormer, REVE remote code)
+# ── Transitive deps from the cloned model repos & torcheeg ──────────────
+# (BioFoundation, NeuroLM, STEEGFormer, REVE remote code, torcheeg)
 timm
 einops
 pyyaml
@@ -27,3 +29,9 @@ ftfy
 regex
 tiktoken
 sentencepiece
+pandas
+scikit-learn
+joblib
+networkx
+lmdb
+xmltodict

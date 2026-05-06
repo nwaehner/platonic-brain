@@ -29,10 +29,13 @@ source venv/bin/activate
 echo "[1/3] Upgrading pip inside venv..."
 pip install --upgrade pip
 
-echo "[2/3] Installing standard dependencies from requirements.txt..."
+echo "[2/4] Installing standard dependencies from requirements.txt..."
 pip install -r requirements.txt
 
-echo "[3/3] Installing mamba-ssm + causal-conv1d (for FEMBA, needs CUDA toolkit)..."
+echo "[3/4] Installing torcheeg (with --no-deps to avoid scipy 1.9 downgrade)..."
+pip install torcheeg --no-deps
+
+echo "[4/4] Installing mamba-ssm + causal-conv1d (for FEMBA, needs CUDA toolkit)..."
 if command -v nvcc >/dev/null 2>&1; then
     pip install mamba-ssm causal-conv1d --no-build-isolation
 else
