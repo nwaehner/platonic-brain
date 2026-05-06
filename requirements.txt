@@ -6,3 +6,4 @@ transformers
 safetensors
 mne
 opencv-python
+timm
