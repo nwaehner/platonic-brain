@@ -32,8 +32,14 @@ pip install --upgrade pip
 echo "[2/3] Installing standard dependencies from requirements.txt..."
 pip install -r requirements.txt
 
-echo "[3/3] Installing mamba-ssm + causal-conv1d (for FEMBA, needs CUDA)..."
-pip install mamba-ssm causal-conv1d --no-build-isolation
+echo "[3/3] Installing mamba-ssm + causal-conv1d (for FEMBA, needs CUDA toolkit)..."
+if command -v nvcc >/dev/null 2>&1; then
+    pip install mamba-ssm causal-conv1d --no-build-isolation
+else
+    echo "  nvcc not found — skipping mamba-ssm (FEMBA will not be available)."
+    echo "  To enable FEMBA, install the CUDA toolkit matching your PyTorch CUDA"
+    echo "  version, then run: pip install mamba-ssm causal-conv1d --no-build-isolation"
+fi
 
 echo ""
 echo "Done. Sanity check:"
