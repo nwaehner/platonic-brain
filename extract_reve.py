@@ -329,6 +329,7 @@ def _find_transformer_layers(model, n_layers: int) -> list:
             if obj is None:
                 break
         if obj is not None and hasattr(obj, "__len__") and len(obj) == n_layers:
+            print(f"  [layers] Using model.{attr_path} (len={n_layers})")
             return list(obj)
 
     # Recursive search: walk all named modules, collect every ModuleList of length n_layers
@@ -426,28 +427,74 @@ def embed_window_layerwise(
     shape (1, N_TOKENS, D) = (1, 704, D); we mean-pool over the token dimension
     to get one D-dim vector per layer, consistent with other extractors.
     """
-    captured: list[torch.Tensor] = []
+    # Each "block" in REVE is ModuleList([Attention, FeedForward]); the transformer
+    # forward does:  x = attn(x) + x;  x = ff(x) + x.  Because ModuleList is never
+    # __call__'d, hooks on the block itself never fire — but hooks on its children
+    # (Attention, FeedForward) do. Capture post-block hidden as ff_input + ff_output:
+    #   ff_input  = attn(x_prev) + x_prev   (post-attention residual)
+    #   ff_output = ff_delta
+    #   post_block = ff_input + ff_output   (post-FF residual = block output)
+    captured_in:  list[torch.Tensor | None] = [None] * n_layers
+    captured_out: list[torch.Tensor | None] = [None] * n_layers
     hooks = []
-    for block in transformer_layers:
-        hooks.append(block.register_forward_hook(
-            lambda m, inp, out, _c=captured: _c.append(
-                out[0] if isinstance(out, tuple) else out
-            )
-        ))
+    for i, block in enumerate(transformer_layers):
+        ff = block[1]   # FeedForward
+        def make_pre(idx):
+            def pre(_m, inp, _idx=idx):
+                captured_in[_idx] = inp[0] if isinstance(inp, tuple) else inp
+            return pre
+        def make_post(idx):
+            def post(_m, _i, out, _idx=idx):
+                captured_out[_idx] = out[0] if isinstance(out, tuple) else out
+            return post
+        hooks.append(ff.register_forward_pre_hook(make_pre(i)))
+        hooks.append(ff.register_forward_hook(make_post(i)))
 
     x = torch.from_numpy(window).unsqueeze(0).to(device)   # (1, 64, 2000)
 
     with torch.no_grad():
-        model(x, positions)
+        out = model(x, positions)
 
     for h in hooks:
         h.remove()
 
+    # ── DIAGNOSTICS (printed once per process) ────────────────────────────────
+    if not getattr(embed_window_layerwise, "_diag_done", False):
+        embed_window_layerwise._diag_done = True
+        n_in_fired  = sum(1 for t in captured_in  if t is not None)
+        n_out_fired = sum(1 for t in captured_out if t is not None)
+        print(f"\n  [diag] FF hooks: {n_in_fired}/{n_layers} pre fired, "
+              f"{n_out_fired}/{n_layers} post fired")
+        if captured_in[0] is not None and captured_out[0] is not None:
+            ti, to = captured_in[0], captured_out[0]
+            print(f"  [diag] block[0]  ff_in shape={tuple(ti.shape)} ||x||={float(ti.float().norm()):.4f}"
+                  f"  ff_out shape={tuple(to.shape)} ||x||={float(to.float().norm()):.4f}")
+            tiL, toL = captured_in[-1], captured_out[-1]
+            print(f"  [diag] block[-1] ff_in shape={tuple(tiL.shape)} ||x||={float(tiL.float().norm()):.4f}"
+                  f"  ff_out shape={tuple(toL.shape)} ||x||={float(toL.float().norm()):.4f}")
+        if isinstance(out, torch.Tensor):
+            print(f"  [diag] model() returned Tensor shape={tuple(out.shape)} "
+                  f"||x||={float(out.float().norm()):.4f}")
+    # ──────────────────────────────────────────────────────────────────────────
+
+    assert all(t is not None for t in captured_in) and all(t is not None for t in captured_out), (
+        f"FF hooks did not fire on every block "
+        f"(pre={sum(t is not None for t in captured_in)}, "
+        f"post={sum(t is not None for t in captured_out)}, expected={n_layers})."
+    )
+
     result = np.zeros((n_layers, embed_dim), dtype=np.float32)
-    for layer_idx, hidden in enumerate(captured):
-        # hidden: (1, 704, D) — mean-pool over all channel×patch tokens
-        pooled = hidden.mean(dim=1)              # (1, D)
+    for layer_idx in range(n_layers):
+        # post-block hidden = ff_input + ff_output, then mean-pool over tokens
+        post = captured_in[layer_idx] + captured_out[layer_idx]    # (1, N_TOKENS, D)
+        pooled = post.mean(dim=1)                                  # (1, D)
         result[layer_idx] = pooled.squeeze(0).cpu().float().numpy()
+
+    if not np.isfinite(result).all() or np.linalg.norm(result) == 0.0:
+        raise RuntimeError(
+            f"embed_window_layerwise produced an all-zero or non-finite result "
+            f"(||result||={np.linalg.norm(result):.4e})."
+        )
 
     return result
 
@@ -505,6 +552,7 @@ def run(
 
         print(f"  Extracting embeddings (streaming pass 2/2)...")
         t_sub = time.time()
+        w_idx = -1
         for w_idx, (sample_start, raw_window) in enumerate(
             iter_windows(tar_path, test_indices)
         ):
@@ -526,7 +574,23 @@ def run(
                       f"{rate:.2f} win/s  ETA {eta/60:.1f} min")
 
         starts_saved = True
-        print(f"  [{subject}] done in {(time.time() - t_sub)/60:.1f} min")
+        n_yielded = w_idx + 1
+        print(f"  [{subject}] done in {(time.time() - t_sub)/60:.1f} min  "
+              f"(windows yielded by iter_windows: {n_yielded}/{n_win})")
+        if n_yielded == 0:
+            raise RuntimeError(
+                f"iter_windows yielded ZERO windows for {subject}. The streaming "
+                f"reader is not producing data — check tar segment naming, the "
+                f"test_indices subset, or get_tar_path()."
+            )
+        # Verify this subject's slice is non-zero
+        subj_norm = float(np.linalg.norm(embeddings[:, :n_yielded, s_idx, :]))
+        print(f"  [{subject}] ||embeddings[:, :, {s_idx}, :]|| = {subj_norm:.4f}")
+        if subj_norm == 0.0:
+            raise RuntimeError(
+                f"Embeddings for {subject} are all zero after the inner loop ran "
+                f"({n_yielded} windows). Inspect the [diag] line printed above."
+            )
 
     out_dir.mkdir(parents=True, exist_ok=True)
     np.savez(
