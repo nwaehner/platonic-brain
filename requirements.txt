@@ -3,7 +3,10 @@
 # older versions fall back to a source build that requires gfortran.
 numpy>=1.26
 scipy>=1.11
-torch
+
+# torch + torchvision are installed separately in setup.sh via the cu124
+# index URL so the CUDA-enabled wheels are selected. Pinned to 2.5.1 because
+# mamba-ssm 2.x relies on a c10::Warning ABI that was removed in torch 2.6+.
 
 # ── HuggingFace ──────────────────────────────────────────────────────────
 huggingface_hub
@@ -16,8 +19,15 @@ mne
 mne-connectivity
 wfdb
 
-# ── Video / image ────────────────────────────────────────────────────────
+# ── Video / image ─────────────────────────────────────────────────────────
+# opencv-python-headless avoids the libGL.so.1 dependency absent on headless
+# servers; functionally identical to opencv-python for all extract_*.py uses.
 opencv-python-headless
+
+# ── Build tools ──────────────────────────────────────────────────────────
+# wheel must be present before mamba-ssm / causal-conv1d so their
+# pyproject.toml metadata step can run.
+wheel
 
 # ── Transitive deps from the cloned model repos & torcheeg ──────────────
 # (BioFoundation, NeuroLM, STEEGFormer, REVE remote code, torcheeg)
