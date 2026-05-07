@@ -17,7 +17,7 @@ mne-connectivity
 wfdb
 
 # ── Video / image ────────────────────────────────────────────────────────
-opencv-python
+opencv-python-headless
 
 # ── Transitive deps from the cloned model repos & torcheeg ──────────────
 # (BioFoundation, NeuroLM, STEEGFormer, REVE remote code, torcheeg)

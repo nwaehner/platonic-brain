@@ -306,6 +306,7 @@ def load_model(size: str, neurolm_repo: Path, device: torch.device):
     _orig = torch.load
     def _cpu_load(*a, **kw):
         kw.setdefault("map_location", "cpu")
+        kw.setdefault("weights_only", False)
         return _orig(*a, **kw)
     torch.load = _cpu_load
     try:

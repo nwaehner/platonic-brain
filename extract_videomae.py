@@ -78,7 +78,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from transformers import VideoMAEModel, VideoMAEImageProcessor
+from transformers import VideoMAEForPreTraining, VideoMAEImageProcessor
 
 # ── HuggingFace dataset configuration ────────────────────────────────────────
 HF_DATASET_REPO = "Fudan-fMRI/CineBrain"
@@ -327,8 +327,47 @@ def run(
     print(f"  Loading {HF_MODELS[size]}...")
     t0        = time.time()
     processor = VideoMAEImageProcessor.from_pretrained(HF_MODELS[size])
-    model     = VideoMAEModel.from_pretrained(HF_MODELS[size]).to(device).eval()
-    D         = model.config.hidden_size
+
+    # Transformers 5.x renamed q_bias/v_bias → query.bias/value.bias but the
+    # MCG-NJU checkpoints still use the old names.  Load the raw checkpoint,
+    # remap keys, then initialise the model from config + load_state_dict so
+    # from_pretrained never sees the mismatched names.
+    from huggingface_hub import hf_hub_download
+    from transformers import VideoMAEConfig
+    import safetensors.torch as _st
+
+    try:
+        _ckpt = _st.load_file(
+            hf_hub_download(HF_MODELS[size], "model.safetensors", repo_type="model")
+        )
+    except Exception:
+        _ckpt = torch.load(
+            hf_hub_download(HF_MODELS[size], "pytorch_model.bin", repo_type="model"),
+            map_location="cpu", weights_only=True,
+        )
+
+    _remapped = {}
+    for _k, _v in _ckpt.items():
+        if _k.endswith(".q_bias"):
+            _remapped[_k.replace(".q_bias", ".query.bias")] = _v
+            # VideoMAE has no key bias; zero-init so the model loads cleanly
+            _remapped[_k.replace(".q_bias", ".key.bias")] = torch.zeros_like(_v)
+        elif _k.endswith(".v_bias"):
+            _remapped[_k.replace(".v_bias", ".value.bias")] = _v
+        else:
+            _remapped[_k] = _v
+    del _ckpt
+
+    _config = VideoMAEConfig.from_pretrained(HF_MODELS[size])
+    _full   = VideoMAEForPreTraining(_config)
+    _missing, _unexpected = _full.load_state_dict(_remapped, strict=False)
+    del _remapped
+    if _missing or _unexpected:
+        print(f"  load_state_dict: {len(_missing)} missing, {len(_unexpected)} unexpected keys")
+
+    model = _full.videomae.to(device).eval()
+    D     = model.config.hidden_size
+    del _full
     print(f"  Loaded in {time.time() - t0:.1f} s  |  D={D}")
 
     embeddings = np.zeros((W, D), dtype=np.float32)
