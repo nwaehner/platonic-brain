@@ -117,7 +117,7 @@ MODEL_CONFIGS: dict[str, dict] = {
     "large": {
         "hf_repo":  "brain-bzh/reve-large",
         "n_layers": 22,
-        "embed_dim": 1250,
+        "embed_dim": 1216,
         "out_stem": "reve_large",
     },
 }

@@ -6,10 +6,6 @@
 !README.md
 !requirements.txt
 !setup.sh
-!extract_femba.py
-!extract_luna.py
-!extract_neurolm.py
-!extract_reve.py
-!extract_steegformer.py
-!extract_videomae.py
-!extract_dinov2.py
+!analyze_mknn_hf.ipynb
+!ExtractionScripts/
+!ExtractionScripts/**
