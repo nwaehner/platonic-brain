@@ -6,6 +6,8 @@
 !README.md
 !requirements.txt
 !setup.sh
-!analyze_mknn_hf.ipynb
-!ExtractionScripts/
-!ExtractionScripts/**
+!notebooks/
+!notebooks/**
+!src/
+!src/**
+!LICENCE
