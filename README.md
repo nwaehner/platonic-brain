@@ -38,9 +38,10 @@ git clone https://github.com/pulp-bio/BioFoundation.git   models/BioFoundation
 git clone https://github.com/935963004/NeuroLM.git        models/NeuroLM
 git clone https://github.com/LiuyinYang1101/STEEGFormer.git models/STEEGFormer
 
-# Python deps
-pip install huggingface_hub safetensors transformers torch numpy scipy mne \
-            opencv-python mamba-ssm
+# Python deps — creates ./venv/, installs pinned torch + requirements.txt
+# (+ torcheeg, and mamba-ssm/causal-conv1d if nvcc is available, for FEMBA)
+bash setup.sh
+source venv/bin/activate
 
 # HuggingFace token (REVE is gated; CineBrain dataset may also require login)
 echo "hf_xxxx..." > hf_token.txt   # or set HF_TOKEN env var
