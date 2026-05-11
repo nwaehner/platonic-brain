@@ -8,9 +8,13 @@ of any length. For each EEG window of D seconds the script:
   2. Concatenates the relevant frames (whole and/or partial clips),
   3. Uniformly samples **D frames (1 frame per second)**,
   4. Runs each frame through DINOv2 with output_hidden_states=True,
-  5. For every transformer block: mean-pools the patch tokens (the CLS token
-     at position 0 is excluded), then averages across the frames of the window
-     → one (D_emb,) vector per layer per window.
+  5. For every transformer block: takes the CLS token (sequence position 0),
+     then averages it across the frames of the window → one (D_emb,) vector
+     per layer per window.
+
+The CLS token is used (not mean-pooled patch tokens) to match the protocol of
+Huh et al. 2024 (platonic-rep), which pools ViT features as ``v[:, 0, :]`` per
+layer; the Aristotelian paper follows that same protocol.
 
 So the output is layerwise — shape (n_layers, W, D_emb) — mirroring the EEG
 extractors' (n_layers, W, S, D), so cross-modal alignment can be measured
@@ -296,13 +300,14 @@ def _sample_uniform(frames: list[np.ndarray], n: int) -> list[np.ndarray]:
 def _embed_frames(processor, model, device, frames: list[np.ndarray]) -> np.ndarray:
     """
     Batch all frames through DINOv2 in one forward pass with hidden states.
-    For each transformer block, mean-pool the patch tokens (CLS token at
-    position 0 excluded) over the sequence, then average over the window's
-    frames. Returns (n_layers, D); n_layers = num_hidden_layers (the input
-    embedding output hidden_states[0] is dropped).
+    For each transformer block, take the CLS token (sequence position 0) and
+    average it over the window's frames. Returns (n_layers, D); n_layers =
+    num_hidden_layers (the input embedding output hidden_states[0] is dropped,
+    matching the EEG extractors which capture post-block hidden states only).
 
-    To use the CLS token instead, replace ``h[:, 1:, :].mean(dim=1)`` with
-    ``h[:, 0, :]``.
+    Uses the CLS token to match Huh et al. 2024 (platonic-rep), which pools ViT
+    features as ``v[:, 0, :]`` per layer. To mean-pool the patch tokens instead,
+    replace ``h[:, 0, :]`` with ``h[:, 1:, :].mean(dim=1)``.
     """
     inputs = processor(images=frames, return_tensors="pt").to(device)
     with torch.no_grad():
@@ -310,7 +315,7 @@ def _embed_frames(processor, model, device, frames: list[np.ndarray]) -> np.ndar
     # out.hidden_states: tuple of (num_hidden_layers + 1) tensors,
     # each (n_frames, 1 + n_patches, D)
     layers = out.hidden_states[1:]
-    pooled = [h[:, 1:, :].mean(dim=1).mean(dim=0) for h in layers]   # each (D,)
+    pooled = [h[:, 0, :].mean(dim=0) for h in layers]   # CLS per layer, avg over frames → (D,)
     return torch.stack(pooled, dim=0).cpu().float().numpy()          # (n_layers, D)
 
 

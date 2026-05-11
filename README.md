@@ -21,9 +21,10 @@ Each writes `embeddings/<model>_<size>_layerwise.npz` of shape
 
 Aligned 1-to-1 with the EEG windows of the corresponding family. Both are
 **layerwise** too: each writes `<model>_<size>__<eeg_family>.npz` of shape
-`(n_layers, W, D)` — for every transformer block, the tokens are mean-pooled
-(DINOv2 excludes the CLS token; VideoMAE has none) and, for DINOv2, averaged
-over the window's frames. This mirrors the EEG `(n_layers, W, S, D)` arrays so
+`(n_layers, W, D)` — for every transformer block, DINOv2 takes the CLS token
+(matching the `v[:, 0, :]` pooling in Huh et al. 2024 / platonic-rep) averaged
+over the window's frames, and VideoMAE (which has no CLS token) mean-pools its
+spatiotemporal tokens. This mirrors the EEG `(n_layers, W, S, D)` arrays so
 cross-modal alignment can be measured between every pair of layers.
 
 | Script               | Model          | Sizes                          | Per window |
