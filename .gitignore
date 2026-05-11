@@ -11,3 +11,8 @@
 !src/
 !src/**
 !LICENSE
+
+# ...but never commit caches / checkpoints, even under the allow-listed dirs.
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

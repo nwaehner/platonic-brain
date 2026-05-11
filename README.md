@@ -19,7 +19,12 @@ Each writes `embeddings/<model>_<size>_layerwise.npz` of shape
 
 ## Video / image extractors
 
-Aligned 1-to-1 with the EEG windows of the corresponding family.
+Aligned 1-to-1 with the EEG windows of the corresponding family. Both are
+**layerwise** too: each writes `<model>_<size>__<eeg_family>.npz` of shape
+`(n_layers, W, D)` — for every transformer block, the tokens are mean-pooled
+(DINOv2 excludes the CLS token; VideoMAE has none) and, for DINOv2, averaged
+over the window's frames. This mirrors the EEG `(n_layers, W, S, D)` arrays so
+cross-modal alignment can be measured between every pair of layers.
 
 | Script               | Model          | Sizes                          | Per window |
 |----------------------|----------------|--------------------------------|------------|
@@ -27,7 +32,7 @@ Aligned 1-to-1 with the EEG windows of the corresponding family.
 | `extract_dinov2.py`  | DINOv2         | small / base / large / giant   | 1 frame per second |
 
 Both download `videos.tar` (2.59 GB) from HuggingFace once, extract clips locally,
-then produce `<model>_<size>__<eeg_family>.npz`. EEG families:
+then produce one NPZ per `(size, eeg_family)`. EEG families:
 `femba_luna` (5 s), `steegformer` (6 s), `neurolm` (8 s), `reve` (10 s).
 
 ## Setup

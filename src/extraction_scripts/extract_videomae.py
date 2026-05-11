@@ -1,13 +1,25 @@
 """
 extract_videomae.py
 
-Extract VideoMAE embeddings for video windows aligned to EEG windows of any
-length. For each EEG window of D seconds the script:
+Extract layerwise VideoMAE embeddings for video windows aligned to EEG windows
+of any length. For each EEG window of D seconds the script:
   1. Loads the corresponding video range from the CineBrain `videos.tar`
      (8100 clips, each clip = 4 s),
   2. Concatenates the relevant frames (whole and/or partial clips),
   3. Uniformly samples 16 frames,
-  4. Produces one mean-pooled VideoMAE embedding.
+  4. Runs them through VideoMAE with output_hidden_states=True and, for every
+     transformer block, mean-pools the spatiotemporal tokens → one (D,) vector
+     per layer per window.
+
+So the output is layerwise — shape (n_layers, W, D) — mirroring the EEG
+extractors' (n_layers, W, S, D), so cross-modal alignment can be measured
+between every pair of layers (VideoMAE layer i ↔ EEG-model layer j), as done
+in the Platonic / Aristotelian representation-alignment papers, rather than
+only against a single (last) layer.
+
+n_layers = model.config.num_hidden_layers (the encoder-block outputs;
+hidden_states[0], the input-embedding output, is dropped — matching the EEG
+extractors, which capture post-block hidden states only).
 
 Time alignment per EEG model (D = window_seconds):
     FEMBA, LUNA       :  5 s →  1.25 clips
@@ -37,10 +49,11 @@ Output association:
     One VideoMAE NPZ per (size, family) pair.
 
 Output: embeddings/videomae_{size}__{eeg_family}.npz
-    embeddings      (W, D_emb)  float32
+    embeddings      (n_layers, W, D_emb)  float32
     window_starts_s (W,)        float64   canonical start time in seconds
     window_seconds  scalar      int
     size            scalar      str       VideoMAE size ('base' / 'large')
+    n_layers        scalar      int       number of transformer blocks
     eeg_family      scalar      str       e.g. 'neurolm', 'reve', 'femba'
 
 Usage:
@@ -283,11 +296,17 @@ def _sample_uniform(frames: list[np.ndarray], n: int = N_FRAMES) -> list[np.ndar
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _embed_frames(processor, model, device, frames: list[np.ndarray]) -> np.ndarray:
-    """Run 16 frames through VideoMAE → (D,) mean-pooled token embedding."""
+    """Run 16 frames through VideoMAE → (n_layers, D): for each transformer
+    block, mean-pool the spatiotemporal tokens. n_layers = num_hidden_layers
+    (the input embedding output hidden_states[0] is dropped). The VideoMAE
+    encoder has no CLS token, so the mean is over all tokens."""
     inputs = processor(frames, return_tensors="pt").to(device)
     with torch.no_grad():
-        out = model(**inputs)
-    return out.last_hidden_state.mean(dim=1).squeeze(0).cpu().float().numpy()
+        out = model(**inputs, output_hidden_states=True)
+    # out.hidden_states: tuple of (num_hidden_layers + 1) tensors, each (1, T, D)
+    layers = out.hidden_states[1:]
+    pooled = [h.mean(dim=1).squeeze(0) for h in layers]   # each (D,)
+    return torch.stack(pooled, dim=0).cpu().float().numpy()   # (n_layers, D)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -365,20 +384,21 @@ def run(
     if _missing or _unexpected:
         print(f"  load_state_dict: {len(_missing)} missing, {len(_unexpected)} unexpected keys")
 
-    model = _full.videomae.to(device).eval()
-    D     = model.config.hidden_size
+    model    = _full.videomae.to(device).eval()
+    D        = model.config.hidden_size
+    n_layers = model.config.num_hidden_layers
     del _full
-    print(f"  Loaded in {time.time() - t0:.1f} s  |  D={D}")
+    print(f"  Loaded in {time.time() - t0:.1f} s  |  n_layers={n_layers}  D={D}")
 
-    embeddings = np.zeros((W, D), dtype=np.float32)
+    embeddings = np.zeros((n_layers, W, D), dtype=np.float32)
     t_loop     = time.time()
 
     for w_idx, start_sec in enumerate(starts_s):
         frames = _frames_for_window(float(start_sec), float(window_seconds))
         if len(frames) == 0:
             raise RuntimeError(f"No frames for window {w_idx} at t={start_sec:.2f}s")
-        frames_16          = _sample_uniform(frames, N_FRAMES)
-        embeddings[w_idx]  = _embed_frames(processor, model, device, frames_16)
+        frames_16             = _sample_uniform(frames, N_FRAMES)
+        embeddings[:, w_idx]  = _embed_frames(processor, model, device, frames_16)
 
         if (w_idx + 1) % 50 == 0 or w_idx + 1 == W:
             elapsed = time.time() - t_loop
@@ -395,9 +415,10 @@ def run(
         window_starts_s = starts_s,
         window_seconds  = window_seconds,
         size            = size,
+        n_layers        = n_layers,
         eeg_family      = eeg_family,
     )
-    print(f"\n  Saved {embeddings.shape} → {out_path.name}")
+    print(f"\n  Saved {embeddings.shape} (n_layers, W, D) → {out_path.name}")
 
     del model
     gc.collect()
