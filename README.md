@@ -21,10 +21,11 @@ Each writes `embeddings/<model>_<size>_layerwise.npz` of shape
 
 Aligned 1-to-1 with the EEG windows of the corresponding family.
 
-| Script               | Model          | Sizes                          | Per window |
-|----------------------|----------------|--------------------------------|------------|
-| `extract_videomae.py`| VideoMAE       | base / large                   | 16 frames |
-| `extract_dinov2.py`  | DINOv2         | small / base / large / giant   | 1 frame per second |
+| Script                 | Model        | Sizes                          | Per window |
+|------------------------|--------------|--------------------------------|------------|
+| `extract_videomae.py`  | VideoMAE     | base / large                   | 16 frames |
+| `extract_videomaev2.py`| VideoMAEv2   | base / large / huge / giant    | 16 frames |
+| `extract_dinov2.py`    | DINOv2       | small / base / large / giant   | 1 frame per second |
 
 Both download `videos.tar` (2.59 GB) from HuggingFace once, extract clips locally,
 then produce `<model>_<size>__<eeg_family>.npz`. EEG families:
@@ -33,10 +34,10 @@ then produce `<model>_<size>__<eeg_family>.npz`. EEG families:
 ## Setup
 
 ```bash
-# Clone the model repos that the EEG extractors need
-git clone https://github.com/pulp-bio/BioFoundation.git
-git clone https://github.com/935963004/NeuroLM.git
-git clone https://github.com/LiuyinYang1101/STEEGFormer.git
+# Clone the model repos that the EEG extractors need (kept under models/)
+git clone https://github.com/pulp-bio/BioFoundation.git   models/BioFoundation
+git clone https://github.com/935963004/NeuroLM.git        models/NeuroLM
+git clone https://github.com/LiuyinYang1101/STEEGFormer.git models/STEEGFormer
 
 # Python deps
 pip install huggingface_hub safetensors transformers torch numpy scipy mne \
@@ -75,3 +76,7 @@ python extract_dinov2.py   --eeg-family reve        --window-seconds 10
 - FEMBA and LUNA share the same 5 s tiling, so they share one video / image NPZ
   tagged `femba_luna`.
 - `mamba-ssm` requires CUDA at install time (FEMBA only).
+- `mknn_intramodal.py` computes Mutual k-NN alignment across NeuroLM model sizes
+  (B / L / XL) once the layerwise NPZs exist.
+- Extraction scripts live in `src/extraction_scripts/`, analysis notebooks in
+  `notebooks/`, and the cloned model repos in `models/` (git-ignored).
