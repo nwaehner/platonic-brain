@@ -1,13 +1,2 @@
-# Allow-list: ignore everything in this folder by default,
-# then explicitly unignore the files we want in the public repo.
-*
-
-!.gitignore
-!README.md
-!requirements.txt
-!setup.sh
-!notebooks/
-!notebooks/**
-!src/
-!src/**
-!LICENSE
+src/layer_study/outputs/
+src/layer_study/last_layer_outputs/
