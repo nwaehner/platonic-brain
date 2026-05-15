@@ -350,9 +350,7 @@ def run(
     dtype: torch.dtype,
     test: bool = False,
 ) -> None:
-    global _USE_LOCAL_CLIPS
-    _USE_LOCAL_CLIPS = bool(test)
-
+    # Always use HF data; _USE_LOCAL_CLIPS stays False
     suffix   = "__TEST" if test else ""
     out_path = out_dir / f"vjepa2_{size}__{eeg_family}{suffix}.npz"
 
