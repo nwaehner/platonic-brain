@@ -29,12 +29,32 @@ cross-modal alignment can be measured between every pair of layers.
 
 | Script               | Model          | Sizes                          | Per window |
 |----------------------|----------------|--------------------------------|------------|
-| `extract_videomae.py`| VideoMAE       | base / large                   | 16 frames |
+| `extract_videomae.py`| VideoMAE       | base / large                   | 16 frames (uniform downsample) |
 | `extract_dinov2.py`  | DINOv2         | small / base / large / giant   | 1 frame per second |
+| `extract_vjepa2.py`  | V-JEPA 2       | large / huge / giant           | all native 8 fps frames |
 
-Both download `videos.tar` (2.59 GB) from HuggingFace once, extract clips locally,
+All three download `videos.tar` (2.59 GB) from HuggingFace once, extract clips locally,
 then produce one NPZ per `(size, eeg_family)`. EEG families:
 `femba_luna` (5 s), `steegformer` (6 s), `neurolm` (8 s), `reve` (10 s).
+
+### V-JEPA 2 details
+
+`extract_vjepa2.py` uses Meta's V-JEPA 2 video encoder
+(`facebook/vjepa2-vit{l,h,g}-fpc64-256`) loaded via `AutoModel` from HuggingFace.
+Unlike VideoMAE, it feeds **all native 8 fps frames** covering the window without
+uniform downsampling, so the frame count varies with window length:
+
+| Window | Frames | EEG family |
+|--------|--------|------------|
+| 5 s    | ~42    | femba_luna |
+| 6 s    | ~50    | steegformer |
+| 8 s    | ~66    | neurolm |
+| 10 s   | ~82    | reve |
+
+V-JEPA 2 has no CLS token — embeddings are mean-pooled over all spatiotemporal
+patch tokens (`tubelet_size=2`, `patch_size=16`, input resolution 256×256).
+Output shape: `(n_layers, W, D)` — large: 24 layers / D=1024, huge: 32 / 1280,
+giant: 40 / 1408.
 
 ## Setup
 
@@ -73,6 +93,15 @@ python extract_dinov2.py   --eeg-family femba_luna  --window-seconds 5
 python extract_dinov2.py   --eeg-family steegformer --window-seconds 6
 python extract_dinov2.py   --eeg-family neurolm     --window-seconds 8
 python extract_dinov2.py   --eeg-family reve        --window-seconds 10
+
+python extract_vjepa2.py   --eeg-family femba_luna  --window-seconds 5
+python extract_vjepa2.py   --eeg-family steegformer --window-seconds 6
+python extract_vjepa2.py   --eeg-family neurolm     --window-seconds 8
+python extract_vjepa2.py   --eeg-family reve        --window-seconds 10
+
+# Single size or half-precision (recommended for huge / giant on tight VRAM):
+python extract_vjepa2.py   --eeg-family neurolm     --window-seconds 8  --size large
+python extract_vjepa2.py   --eeg-family reve        --window-seconds 10 --dtype fp16
 ```
 
 ## Notes
