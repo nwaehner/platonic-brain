@@ -1,25 +1,30 @@
 """
-extract_videomae.py
+extract_vjepa2.py
 
-Extract layerwise VideoMAE embeddings for video windows aligned to EEG windows
-of any length. For each EEG window of D seconds the script:
-  1. Loads the corresponding video range from the CineBrain `videos.tar`
-     (8100 clips, each clip = 4 s),
-  2. Concatenates the relevant frames (whole and/or partial clips),
-  3. Uniformly samples 16 frames,
-  4. Runs them through VideoMAE with output_hidden_states=True and, for every
-     transformer block, mean-pools the spatiotemporal tokens → one (D,) vector
-     per layer per window.
+Extract layerwise V-JEPA 2 embeddings for video windows aligned to EEG windows
+of any length. Mirrors extract_videomae.py in structure, output layout, and
+window→clip mapping, but uses Meta's V-JEPA 2 video encoder.
 
-So the output is layerwise — shape (n_layers, W, D) — mirroring the EEG
-extractors' (n_layers, W, S, D), so cross-modal alignment can be measured
-between every pair of layers (VideoMAE layer i ↔ EEG-model layer j), as done
-in the Platonic / Aristotelian representation-alignment papers, rather than
-only against a single (last) layer.
-
-n_layers = model.config.num_hidden_layers (the encoder-block outputs;
-hidden_states[0], the input-embedding output, is dropped — matching the EEG
-extractors, which capture post-block hidden states only).
+Key differences vs extract_videomae.py:
+  * Spatial resolution: 256 (V-JEPA 2 native), not 224.
+  * Variable frame count per window — NOT uniformly downsampled to 16.
+    Source clips are 8 fps and decode to 33 frames each (one terminal frame
+    beyond the nominal 4 s); concatenated across windows tiled at CLIP_SECONDS
+    = 4.0 s this typically yields:
+        5 s →  42 frames   6 s →  50 frames
+        8 s →  66 frames  10 s →  82 frames  (trimmed to 82 — see guard below)
+    All counts must be even (tubelet_size=2); the guard at the end of
+    _frames_for_window drops a final frame when necessary. The range lies
+    within or near the
+    16–64 frame range V-JEPA 2 was actually pretrained on (Bardes et al. 2025
+    §2.4: progressive-resolution training at 16 → 64 frames; explicitly tested
+    up to 128 / 256 frames at inference). 3D-RoPE positional encoding handles
+    the length variation natively.
+  * Model: facebook/vjepa2-vit{l,h,g}-fpc64-256 via AutoModel.  No q_bias/
+    v_bias key remapping — V-JEPA 2 ships with modern HF weight names.
+  * Forward uses skip_predictor=True (we only need the encoder) and
+    output_hidden_states=True; per-layer mean-pool over all spatiotemporal
+    patch tokens (V-JEPA 2 has no CLS token).
 
 Time alignment per EEG model (D = window_seconds):
     FEMBA, LUNA       :  5 s →  1.25 clips
@@ -27,55 +32,41 @@ Time alignment per EEG model (D = window_seconds):
     NeuroLM           :  8 s →  2    clips (exact alignment)
     REVE              : 10 s →  2.5  clips
 
-Source data:
-    HuggingFace dataset Fudan-fMRI/CineBrain → `videos.tar` (2.59 GB).
-    On first run the tar is downloaded (cached by huggingface_hub) and
-    extracted once to CB_ROOT/.clip_cache/. Subsequent runs reuse it.
+Source data, window source, output association: identical to extract_videomae.py.
 
-Window source:
-    Windows are generated deterministically from `--window-seconds`:
-        window_starts_s = np.arange(0, 10800, window_seconds)
-    matching every EEG extractor's non-overlapping tiling of Season 7. No EEG
-    NPZ is required — you do NOT need to have run any EEG extractor first.
-
-Output association:
-    Each output is tagged with `--eeg-family`. FEMBA and LUNA both use the
-    same 5 s window tiling, so they share one VideoMAE NPZ tagged 'femba_luna'.
-    Choices:
-        femba_luna   — 5 s windows  (covers both FEMBA and LUNA)
-        steegformer  — 6 s windows
-        neurolm      — 8 s windows
-        reve         — 10 s windows
-    One VideoMAE NPZ per (size, family) pair.
-
-Output: embeddings/videomae_{size}__{eeg_family}.npz
+Output: embeddings/vjepa2_{size}__{eeg_family}.npz
     embeddings      (n_layers, W, D_emb)  float32
-    window_starts_s (W,)        float64   canonical start time in seconds
+    window_starts_s (W,)        float64
     window_seconds  scalar      int
-    size            scalar      str       VideoMAE size ('base' / 'large')
-    n_layers        scalar      int       number of transformer blocks
-    eeg_family      scalar      str       e.g. 'neurolm', 'reve', 'femba'
+    size            scalar      str  ('large' / 'huge' / 'giant')
+    n_layers        scalar      int
+    eeg_family      scalar      str
+
+Embedding dim D_emb per size:  large=1024  huge=1280  giant=1408
+n_layers per size:             large=24    huge=32    giant=40
 
 Usage:
     # 5 s FEMBA + LUNA shared
-    python extract_videomae.py --eeg-family femba_luna --window-seconds 5
-    # → videomae_base__femba_luna.npz, videomae_large__femba_luna.npz
+    python extract_vjepa2.py --eeg-family femba_luna --window-seconds 5
+    # → vjepa2_large__femba_luna.npz, vjepa2_huge__femba_luna.npz,
+    #   vjepa2_giant__femba_luna.npz
 
-    # 6 s ST-EEGFormer
-    python extract_videomae.py --eeg-family steegformer --window-seconds 6
-    # → videomae_base__steegformer.npz, videomae_large__steegformer.npz
+    # Single size:
+    python extract_vjepa2.py --size large --eeg-family neurolm --window-seconds 8
 
-    # 8 s NeuroLM
-    python extract_videomae.py --eeg-family neurolm --window-seconds 8
+    # Half-precision (recommended for huge / giant on tight VRAM):
+    python extract_vjepa2.py --eeg-family reve --window-seconds 10 --dtype fp16
 
-    # 10 s REVE
-    python extract_videomae.py --eeg-family reve --window-seconds 10
-
-Disk space:
-    ~2.6 GB cached tar + ~2.6 GB extracted clips ≈ 5.2 GB total on first run.
+VRAM (single window, fp32, 80-frame worst case):
+    sequence_length = (80/2) * (256/16)^2 = 40 * 256 = 10 240 tokens
+    large  ~  3 GB activations
+    huge   ~  5 GB
+    giant  ~  8 GB
+    Switch to fp16 for headroom; weights are released as fp32 but the encoder
+    runs cleanly in fp16 with sdpa attention.
 
 Requirements:
-    pip install opencv-python transformers torch numpy huggingface_hub
+    pip install opencv-python "transformers>=4.53" torch numpy huggingface_hub
 """
 
 from __future__ import annotations
@@ -91,7 +82,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from transformers import VideoMAEForPreTraining, VideoMAEImageProcessor
+from transformers import AutoModel, AutoVideoProcessor
 
 # ── HuggingFace dataset configuration ────────────────────────────────────────
 HF_DATASET_REPO = "Fudan-fMRI/CineBrain"
@@ -99,24 +90,31 @@ HF_VIDEOS_TAR   = "videos.tar"
 
 CB_ROOT      = Path(__file__).parents[1]
 EMBED_DIR    = CB_ROOT / "embeddings"
-CLIP_CACHE   = CB_ROOT / ".clip_cache"           # extracted clips live here
-CLIP_MARKER  = CLIP_CACHE / ".extracted"         # touched once tar fully unpacks
-CLIP_SECONDS = 4.0                               # each clip is 4 s long
+CLIP_CACHE   = CB_ROOT / ".clip_cache"
+CLIP_MARKER  = CLIP_CACHE / ".extracted"
+CLIP_SECONDS = 4.0
+# Pre-extracted clips ONLY consulted in --test mode (so smoke tests on a dev
+# machine don't have to re-download 2.6 GB). Production / server runs always
+# pull videos.tar from HuggingFace via _ensure_clips_extracted().
+CLIP_DIR_LOCAL_TEST = CB_ROOT / "Data" / "clips"
 
-# Season 7 (the season the participants were watching during EEG recording)
-# spans clips 0..2699 inclusive — i.e. the first 10 episodes × 270 clips/episode.
-# Clips 2700..8099 are from other seasons not shown to the participants and
-# must not appear in any cross-modal alignment.
-MAX_CLIP_IDX = 2699
+# Season 7 (the season participants watched during EEG recording) spans clips
+# 0..2699 inclusive. Clips 2700..8099 must not appear in cross-modal alignment.
+MAX_CLIP_IDX   = 2699
 SEASON_END_SEC = (MAX_CLIP_IDX + 1) * CLIP_SECONDS    # 10800 s
 
 HF_MODELS = {
-    "base":  "MCG-NJU/videomae-base",
-    "large": "MCG-NJU/videomae-large",
+    "large": "facebook/vjepa2-vitl-fpc64-256",
+    "huge":  "facebook/vjepa2-vith-fpc64-256",
+    "giant": "facebook/vjepa2-vitg-fpc64-256",
 }
 
-N_FRAMES   = 16    # VideoMAE fixed input length
-FRAME_SIZE = 224   # VideoMAE expected spatial resolution
+FRAME_SIZE   = 256   # V-JEPA 2 native input resolution
+TUBELET_SIZE = 2     # frame count MUST be even
+
+# Source video fps inside videos.tar (CineBrain clips are 8 fps × 4 s = 32
+# frames per clip). Used only for documentation / sanity prints.
+SOURCE_FPS = 8
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -147,10 +145,6 @@ def _get_hf_token() -> str | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _ensure_clips_extracted() -> Path:
-    """
-    Download videos.tar (cached by huggingface_hub) and extract it once into
-    CLIP_CACHE. Returns the cache directory.
-    """
     if CLIP_MARKER.exists():
         return CLIP_CACHE
 
@@ -174,16 +168,20 @@ def _ensure_clips_extracted() -> Path:
 
 
 _CLIP_INDEX: dict[int, Path] = {}
+_USE_LOCAL_CLIPS = False  # set to True only by run(..., test=True)
 
 def _resolve_clip_path(clip_idx: int) -> Path:
-    """
-    Map clip index → on-disk path. The mapping is built once on first call by
-    scanning CLIP_CACHE for *.mp4 files and parsing digit runs from filenames,
-    so the internal naming convention inside videos.tar does not need to be
-    hardcoded.
-    """
     if not _CLIP_INDEX:
-        clips_dir = _ensure_clips_extracted()
+        if _USE_LOCAL_CLIPS:
+            clips_dir = CLIP_DIR_LOCAL_TEST
+            if not (clips_dir.exists() and any(clips_dir.glob("*.mp4"))):
+                raise RuntimeError(
+                    f"--test requested local clips at {clips_dir} but none "
+                    f"were found there."
+                )
+            print(f"  [test mode] using local clips from {clips_dir}")
+        else:
+            clips_dir = _ensure_clips_extracted()
         for p in clips_dir.rglob("*.mp4"):
             digits = "".join(c for c in p.stem if c.isdigit())
             if digits:
@@ -206,11 +204,7 @@ def _resolve_clip_path(clip_idx: int) -> Path:
 
 @lru_cache(maxsize=8)
 def _load_clip_frames(clip_idx: int) -> tuple:
-    """
-    Decode all frames of clip clip_idx. Returns an immutable tuple of
-    (H, W, 3) uint8 RGB arrays. lru_cache reuses results for adjacent
-    windows that share clips.
-    """
+    """Decode all frames of clip clip_idx as (H, W, 3) uint8 RGB at 256×256."""
     path = _resolve_clip_path(clip_idx)
     cap  = cv2.VideoCapture(str(path))
     if not cap.isOpened():
@@ -234,29 +228,27 @@ def _load_clip_frames(clip_idx: int) -> tuple:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _canonical_starts_s(window_seconds: int) -> np.ndarray:
-    """
-    Non-overlapping window starts tiling Season 7 (0..10800 s) — matches every
-    EEG extractor's window iteration regardless of underlying unit (segments
-    or 1000-Hz samples), since all of them tile contiguously from t=0.
-        5 s → 2160 windows
-        6 s → 1800 windows
-        8 s → 1350 windows
-       10 s → 1080 windows
-    """
+    """Non-overlapping window starts tiling Season 7."""
     return np.arange(0.0, SEASON_END_SEC, float(window_seconds), dtype=np.float64)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Window → frames  (handles partial clips for non-integer clip counts)
+# Window → frames  (variable length; tubelet_size=2 → must be even)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _frames_for_window(start_sec: float, window_sec: float) -> list[np.ndarray]:
     """
-    Concatenate the frames covering [start_sec, start_sec + window_sec) by
-    pulling whole or partial clips. Each clip i covers [i*4, (i+1)*4) seconds.
+    Concatenate all native frames covering [start_sec, start_sec + window_sec)
+    by pulling whole or partial clips. No uniform downsampling — V-JEPA 2 is
+    fed all available frames so the effective sampling rate matches the source
+    (8 fps), keeping motion statistics in the regime the encoder was trained on.
 
-    For a 10 s window starting at 0 s this yields:
-      clip 0 (full, 4 s) + clip 1 (full, 4 s) + clip 2 first 2 s.
+    CineBrain clips decode to 33 frames @ 8 fps, so frame counts per window
+    (before the even-count guard) are typically:
+        5 s window:  33 +  9 =  42 frames
+        6 s window:  33 + 17 =  50 frames
+        8 s window:  33 + 33 =  66 frames    (close to pretrain length 64)
+       10 s window:  33 + 33 + 17 = 83 → 82 frames (final frame trimmed)
     """
     end_sec    = start_sec + window_sec
     first_clip = int(start_sec // CLIP_SECONDS)
@@ -266,8 +258,7 @@ def _frames_for_window(start_sec: float, window_sec: float) -> list[np.ndarray]:
         raise ValueError(
             f"Window [{start_sec:.2f}, {end_sec:.2f})s requires clip "
             f"{last_clip}, but Season 7 ends at clip {MAX_CLIP_IDX} "
-            f"(t={SEASON_END_SEC:.0f}s). The EEG NPZ should not contain "
-            f"windows extending beyond Season 7."
+            f"(t={SEASON_END_SEC:.0f}s)."
         )
 
     frames: list[np.ndarray] = []
@@ -282,31 +273,60 @@ def _frames_for_window(start_sec: float, window_sec: float) -> list[np.ndarray]:
         f_start     = max(0, f_start)
         f_end       = min(n_frames, f_end)
         frames.extend(clip_frames[f_start:f_end])
+
+    # V-JEPA 2 tubelet_size = 2 → number of frames must be even.  At 8 fps with
+    # integer-second windows this is already satisfied for 5/6/8/10 s, but the
+    # floor/ceil rounding above can in principle produce an odd count at clip
+    # boundaries when the source fps is not exactly 8.  Guard by dropping the
+    # final frame if needed.
+    if len(frames) % TUBELET_SIZE != 0:
+        frames = frames[: len(frames) - (len(frames) % TUBELET_SIZE)]
+
+    if len(frames) < 4:
+        raise RuntimeError(
+            f"Only {len(frames)} frames for window starting {start_sec:.2f}s "
+            f"(need ≥ 4 for V-JEPA 2 with tubelet_size=2)."
+        )
     return frames
 
 
-def _sample_uniform(frames: list[np.ndarray], n: int = N_FRAMES) -> list[np.ndarray]:
-    """Uniformly sample n frames across the full available range."""
-    indices = np.linspace(0, len(frames) - 1, n, dtype=int)
-    return [frames[i] for i in indices]
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# VideoMAE forward pass
+# V-JEPA 2 forward pass
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _embed_frames(processor, model, device, frames: list[np.ndarray]) -> np.ndarray:
-    """Run 16 frames through VideoMAE → (n_layers, D): for each transformer
-    block, mean-pool the spatiotemporal tokens. n_layers = num_hidden_layers
-    (the input embedding output hidden_states[0] is dropped). The VideoMAE
-    encoder has no CLS token, so the mean is over all tokens."""
-    inputs = processor(frames, return_tensors="pt").to(device)
+def _embed_frames(processor, model, device, dtype, frames: list[np.ndarray]) -> np.ndarray:
+    """
+    Run a variable-length frame list through V-JEPA 2 and return one mean-pooled
+    vector per transformer block: shape (n_layers, D).
+
+    The processor accepts an array of shape (T, H, W, C) uint8 RGB (matches
+    the HF docs example `video = np.ones((64, 256, 256, 3))`) and produces
+    `pixel_values_videos` of shape (1, T, C, H, W).
+
+    `skip_predictor=True` skips the predictor head (we only need the encoder).
+    `output_hidden_states=True` returns a tuple of length (num_hidden_layers + 1):
+    the first element is the input embedding, the rest are the post-block
+    hidden states.  We drop the first to match the EEG-extractor convention
+    (and extract_videomae.py:307).
+
+    V-JEPA 2 has no CLS token — mean-pool over all spatiotemporal patch tokens.
+    """
+    video = np.stack(frames, axis=0)  # (T, H, W, 3) uint8 RGB
+    inputs = processor(video, return_tensors="pt")
+    inputs = {k: v.to(device=device, dtype=dtype if v.is_floating_point() else v.dtype)
+              for k, v in inputs.items()}
+
     with torch.no_grad():
-        out = model(**inputs, output_hidden_states=True)
-    # out.hidden_states: tuple of (num_hidden_layers + 1) tensors, each (1, T, D)
-    layers = out.hidden_states[1:]
+        outputs = model(
+            **inputs,
+            skip_predictor       = True,
+            output_hidden_states = True,
+        )
+
+    # hidden_states: tuple of (num_hidden_layers + 1) tensors, each (1, N_tok, D)
+    layers = outputs.hidden_states[1:]
     pooled = [h.mean(dim=1).squeeze(0) for h in layers]   # each (D,)
-    return torch.stack(pooled, dim=0).cpu().float().numpy()   # (n_layers, D)
+    return torch.stack(pooled, dim=0).float().cpu().numpy()   # (n_layers, D)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -315,90 +335,74 @@ def _embed_frames(processor, model, device, frames: list[np.ndarray]) -> np.ndar
 
 EEG_FAMILIES = ("femba_luna", "steegformer", "neurolm", "reve")
 
+_TORCH_DTYPES = {
+    "fp32": torch.float32,
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+}
+
 def run(
     size: str,
     eeg_family: str,
     window_seconds: int,
     out_dir: Path,
     device: torch.device,
+    dtype: torch.dtype,
+    test: bool = False,
 ) -> None:
-    out_path = out_dir / f"videomae_{size}__{eeg_family}.npz"
+    # Always use HF data; _USE_LOCAL_CLIPS stays False
+    suffix   = "__TEST" if test else ""
+    out_path = out_dir / f"vjepa2_{size}__{eeg_family}{suffix}.npz"
 
     if out_path.exists():
         print(f"\n  {out_path.name} already exists — skipping.")
         return
 
     starts_s = _canonical_starts_s(window_seconds)
+    if test:
+        starts_s = starts_s[:5]   # first 5 windows only
     W        = len(starts_s)
     last_end = float(starts_s[-1]) + window_seconds
 
+    expected_frames = window_seconds * SOURCE_FPS
+
     print(f"\n{'='*72}")
-    print(f"  VideoMAE-{size}  |  window={window_seconds} s "
-          f"({window_seconds / CLIP_SECONDS:.2f} clips)  "
+    print(f"  V-JEPA 2 {size}  |  window={window_seconds} s "
+          f"({window_seconds / CLIP_SECONDS:.2f} clips, "
+          f"~{expected_frames} frames @ {SOURCE_FPS} fps)  "
           f"|  EEG family='{eeg_family}'")
     print(f"  output    : {out_path.name}")
-    print(f"  windows={W}  device={device}")
+    print(f"  windows={W}  device={device}  dtype={dtype}")
     print(f"  time range: [{float(starts_s[0]):.2f}, {last_end:.2f}] s "
           f"(within Season 7: clips 0..{MAX_CLIP_IDX})")
-    print(f"  embedding[i] will correspond 1-to-1 with EEG window i.")
     print(f"{'='*72}")
 
-    print(f"  Loading {HF_MODELS[size]}...")
+    repo_id = HF_MODELS[size]
+    print(f"  Loading {repo_id}...")
     t0        = time.time()
-    processor = VideoMAEImageProcessor.from_pretrained(HF_MODELS[size])
+    processor = AutoVideoProcessor.from_pretrained(repo_id, token=_get_hf_token())
+    model     = AutoModel.from_pretrained(
+        repo_id,
+        torch_dtype       = dtype,
+        attn_implementation = "sdpa",
+        token             = _get_hf_token(),
+    )
+    model = model.to(device).eval()
 
-    # Transformers 5.x renamed q_bias/v_bias → query.bias/value.bias but the
-    # MCG-NJU checkpoints still use the old names.  Load the raw checkpoint,
-    # remap keys, then initialise the model from config + load_state_dict so
-    # from_pretrained never sees the mismatched names.
-    from huggingface_hub import hf_hub_download
-    from transformers import VideoMAEConfig
-    import safetensors.torch as _st
-
-    try:
-        _ckpt = _st.load_file(
-            hf_hub_download(HF_MODELS[size], "model.safetensors", repo_type="model")
-        )
-    except Exception:
-        _ckpt = torch.load(
-            hf_hub_download(HF_MODELS[size], "pytorch_model.bin", repo_type="model"),
-            map_location="cpu", weights_only=True,
-        )
-
-    _remapped = {}
-    for _k, _v in _ckpt.items():
-        if _k.endswith(".q_bias"):
-            _remapped[_k.replace(".q_bias", ".query.bias")] = _v
-            # VideoMAE has no key bias; zero-init so the model loads cleanly
-            _remapped[_k.replace(".q_bias", ".key.bias")] = torch.zeros_like(_v)
-        elif _k.endswith(".v_bias"):
-            _remapped[_k.replace(".v_bias", ".value.bias")] = _v
-        else:
-            _remapped[_k] = _v
-    del _ckpt
-
-    _config = VideoMAEConfig.from_pretrained(HF_MODELS[size])
-    _full   = VideoMAEForPreTraining(_config)
-    _missing, _unexpected = _full.load_state_dict(_remapped, strict=False)
-    del _remapped
-    if _missing or _unexpected:
-        print(f"  load_state_dict: {len(_missing)} missing, {len(_unexpected)} unexpected keys")
-
-    model    = _full.videomae.to(device).eval()
     D        = model.config.hidden_size
     n_layers = model.config.num_hidden_layers
-    del _full
-    print(f"  Loaded in {time.time() - t0:.1f} s  |  n_layers={n_layers}  D={D}")
+    print(f"  Loaded in {time.time() - t0:.1f} s  |  n_layers={n_layers}  D={D}  "
+          f"tubelet={model.config.tubelet_size}  patch={model.config.patch_size}  "
+          f"crop={model.config.crop_size}")
 
     embeddings = np.zeros((n_layers, W, D), dtype=np.float32)
     t_loop     = time.time()
 
     for w_idx, start_sec in enumerate(starts_s):
         frames = _frames_for_window(float(start_sec), float(window_seconds))
-        if len(frames) == 0:
-            raise RuntimeError(f"No frames for window {w_idx} at t={start_sec:.2f}s")
-        frames_16             = _sample_uniform(frames, N_FRAMES)
-        embeddings[:, w_idx]  = _embed_frames(processor, model, device, frames_16)
+        embeddings[:, w_idx] = _embed_frames(
+            processor, model, device, dtype, frames
+        )
 
         if (w_idx + 1) % 50 == 0 or w_idx + 1 == W:
             elapsed = time.time() - t_loop
@@ -420,7 +424,7 @@ def run(
     )
     print(f"\n  Saved {embeddings.shape} (n_layers, W, D) → {out_path.name}")
 
-    del model
+    del model, processor
     gc.collect()
     if device.type == "cuda":
         torch.cuda.empty_cache()
@@ -432,12 +436,12 @@ def run(
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Extract VideoMAE embeddings aligned to EEG windows.",
+        description="Extract V-JEPA 2 embeddings aligned to EEG windows.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     ap.add_argument(
         "--size", choices=list(HF_MODELS), default=None,
-        help="Model size. Omit to run both base and large.",
+        help="Model size. Omit to run all three (large → huge → giant).",
     )
     ap.add_argument(
         "--eeg-family", required=True, choices=EEG_FAMILIES, metavar="NAME",
@@ -458,6 +462,16 @@ def main() -> None:
         help="Torch device (e.g. 'cuda', 'cuda:1', 'cpu'). "
              "Defaults to CUDA if available.",
     )
+    ap.add_argument(
+        "--dtype", choices=list(_TORCH_DTYPES), default="fp32", metavar="DTYPE",
+        help="Compute dtype for the encoder. Use fp16 / bf16 to fit huge or "
+             "giant on tighter VRAM. Output embeddings are always saved as fp32.",
+    )
+    ap.add_argument(
+        "--test", action="store_true",
+        help="Smoke-test mode: process only the first 5 windows and save with "
+             "a '__TEST' suffix so real outputs are never overwritten.",
+    )
     args = ap.parse_args()
 
     out_dir = args.out_dir.expanduser().resolve()
@@ -466,10 +480,17 @@ def main() -> None:
         torch.device(args.device) if args.device
         else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     )
+    dtype = _TORCH_DTYPES[args.dtype]
 
-    sizes = [args.size] if args.size else ["base", "large"]
+    if device.type == "cpu" and dtype != torch.float32:
+        print(f"  Warning: dtype={args.dtype} on CPU is not well supported — "
+              f"forcing fp32.")
+        dtype = torch.float32
+
+    sizes = [args.size] if args.size else ["large", "huge", "giant"]
     for size in sizes:
-        run(size, args.eeg_family, args.window_seconds, out_dir, device)
+        run(size, args.eeg_family, args.window_seconds, out_dir, device, dtype,
+            test=args.test)
 
     print("\nDone.")
 

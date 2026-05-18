@@ -1,14 +1,30 @@
 """
 extract_dinov2.py
 
-Extract DINOv2 embeddings for video windows aligned to EEG windows of any
-length. For each EEG window of D seconds the script:
+Extract layerwise DINOv2 embeddings for video windows aligned to EEG windows
+of any length. For each EEG window of D seconds the script:
   1. Loads the corresponding video range from the CineBrain `videos.tar`
      (8100 clips, each clip = 4 s),
   2. Concatenates the relevant frames (whole and/or partial clips),
   3. Uniformly samples **D frames (1 frame per second)**,
-  4. Runs each frame independently through DINOv2 → CLS token,
-  5. Mean-pools the CLS tokens across frames → one (D_emb,) vector per window.
+  4. Runs each frame through DINOv2 with output_hidden_states=True,
+  5. For every transformer block: takes the CLS token (sequence position 0),
+     then averages it across the frames of the window → one (D_emb,) vector
+     per layer per window.
+
+The CLS token is used (not mean-pooled patch tokens) to match the protocol of
+Huh et al. 2024 (platonic-rep), which pools ViT features as ``v[:, 0, :]`` per
+layer; the Aristotelian paper follows that same protocol.
+
+So the output is layerwise — shape (n_layers, W, D_emb) — mirroring the EEG
+extractors' (n_layers, W, S, D), so cross-modal alignment can be measured
+between every pair of layers (DINOv2 layer i ↔ EEG-model layer j), as done in
+the Platonic / Aristotelian representation-alignment papers, rather than only
+against a single (last) layer.
+
+n_layers = model.config.num_hidden_layers (the encoder-block outputs;
+hidden_states[0], the input-embedding output, is dropped — matching the EEG
+extractors, which capture post-block hidden states only).
 
 DINOv2 is a purely spatial image model; no temporal modeling is performed.
 Cross-modal alignment with EEG/video models reflects static scene content only.
@@ -41,13 +57,13 @@ Output association:
     One DINOv2 NPZ per (DINOv2 size, family) pair.
 
 Output: embeddings/dinov2_{size}__{eeg_family}.npz
-    embeddings      (W, D_emb)  float32
+    embeddings      (n_layers, W, D_emb)  float32
     window_starts_s (W,)        float64   canonical start time in seconds
     window_seconds  scalar      int
     size            scalar      str       DINOv2 size (small/base/large/giant)
+    n_layers        scalar      int       number of transformer blocks
     n_frames        scalar      int       frames per window (= window_seconds)
     eeg_family      scalar      str       e.g. 'neurolm', 'reve', 'femba'
-    eeg_npz_source  scalar      str       source NPZ filename
 
 Usage:
     # 5 s FEMBA + LUNA shared (all four sizes)
@@ -283,14 +299,24 @@ def _sample_uniform(frames: list[np.ndarray], n: int) -> list[np.ndarray]:
 
 def _embed_frames(processor, model, device, frames: list[np.ndarray]) -> np.ndarray:
     """
-    Batch all frames through DINOv2 in one forward pass.
-    Returns the (D,) embedding obtained by mean-pooling the per-frame CLS tokens.
+    Batch all frames through DINOv2 in one forward pass with hidden states.
+    For each transformer block, take the CLS token (sequence position 0) and
+    average it over the window's frames. Returns (n_layers, D); n_layers =
+    num_hidden_layers (the input embedding output hidden_states[0] is dropped,
+    matching the EEG extractors which capture post-block hidden states only).
+
+    Uses the CLS token to match Huh et al. 2024 (platonic-rep), which pools ViT
+    features as ``v[:, 0, :]`` per layer. To mean-pool the patch tokens instead,
+    replace ``h[:, 0, :]`` with ``h[:, 1:, :].mean(dim=1)``.
     """
     inputs = processor(images=frames, return_tensors="pt").to(device)
     with torch.no_grad():
-        out = model(**inputs)
-    cls_tokens = out.last_hidden_state[:, 0, :]   # (n_frames, D)
-    return cls_tokens.mean(dim=0).cpu().float().numpy()
+        out = model(**inputs, output_hidden_states=True)
+    # out.hidden_states: tuple of (num_hidden_layers + 1) tensors,
+    # each (n_frames, 1 + n_patches, D)
+    layers = out.hidden_states[1:]
+    pooled = [h[:, 0, :].mean(dim=0) for h in layers]   # CLS per layer, avg over frames → (D,)
+    return torch.stack(pooled, dim=0).cpu().float().numpy()          # (n_layers, D)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -333,17 +359,18 @@ def run(
     processor = AutoImageProcessor.from_pretrained(HF_MODELS[size])
     model     = AutoModel.from_pretrained(HF_MODELS[size]).to(device).eval()
     D         = model.config.hidden_size
-    print(f"  Loaded in {time.time() - t0:.1f} s  |  D={D}")
+    n_layers  = model.config.num_hidden_layers
+    print(f"  Loaded in {time.time() - t0:.1f} s  |  n_layers={n_layers}  D={D}")
 
-    embeddings = np.zeros((W, D), dtype=np.float32)
+    embeddings = np.zeros((n_layers, W, D), dtype=np.float32)
     t_loop     = time.time()
 
     for w_idx, start_sec in enumerate(starts_s):
         frames = _frames_for_window(float(start_sec), float(window_seconds))
         if len(frames) == 0:
             raise RuntimeError(f"No frames for window {w_idx} at t={start_sec:.2f}s")
-        sampled            = _sample_uniform(frames, n_frames)
-        embeddings[w_idx]  = _embed_frames(processor, model, device, sampled)
+        sampled               = _sample_uniform(frames, n_frames)
+        embeddings[:, w_idx]  = _embed_frames(processor, model, device, sampled)
 
         if (w_idx + 1) % 50 == 0 or w_idx + 1 == W:
             elapsed = time.time() - t_loop
@@ -360,10 +387,11 @@ def run(
         window_starts_s = starts_s,
         window_seconds  = window_seconds,
         size            = size,
+        n_layers        = n_layers,
         n_frames        = n_frames,
         eeg_family      = eeg_family,
     )
-    print(f"\n  Saved {embeddings.shape} → {out_path.name}")
+    print(f"\n  Saved {embeddings.shape} (n_layers, W, D) → {out_path.name}")
 
     del model
     gc.collect()

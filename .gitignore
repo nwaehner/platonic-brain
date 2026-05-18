@@ -1,0 +1,18 @@
+# Allow-list: ignore everything in this folder by default,
+# then explicitly unignore the files we want in the public repo.
+*
+
+!.gitignore
+!README.md
+!requirements.txt
+!setup.sh
+!notebooks/
+!notebooks/**
+!src/
+!src/**
+!LICENSE
+
+# ...but never commit caches / checkpoints, even under the allow-listed dirs.
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
