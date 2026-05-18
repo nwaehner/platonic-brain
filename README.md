@@ -118,5 +118,6 @@ python extract_vjepa2.py   --eeg-family reve        --window-seconds 10 --dtype 
 
 | Notebook | Purpose |
 |---|---|
-| `analyze_mknn_hf.ipynb` | Layerwise cross-modal mKNN between EEG models (all sizes) and VideoMAE / DINOv2 / V-JEPA2. Includes Aristotelian calibration and k-ablation. |
+| `analyze_mknn_hf.ipynb` | Layerwise cross-modal mKNN between EEG models (all sizes) and VideoMAE / DINOv2 / V-JEPA2. Includes Aristotelian calibration and k-ablation. Per-subject scores are computed then averaged. |
+| `analyze_mknn_avgsubj_hf.ipynb` | Same analyses but EEG embeddings are **averaged across subjects first** (per stimulus) before computing kNN. Produces a single calibrated and uncalibrated mKNN score per (EEG size, vision size) pair, measuring alignment of the shared/consensus neural representation rather than individual-level alignment. |
 | `visualize_mknn_stimuli.ipynb` | Stimulus visualizer: for each EEG model (max size) × best vision model, shows the top-5 windows with the highest mutual k-NN overlap as animated GIFs. Each anchor window is shown alongside three rows — **shared neighbors** (EEG ∩ vision), **EEG-only**, and **vision-only** — to let you inspect what semantic features drive cross-modal agreement. Runs for both VideoMAE and DINOv2, and repeats with temporal exclusion (±10 windows removed from the neighbor pool) to control for shot-continuity confounds. |
