@@ -29,13 +29,20 @@ cross-modal alignment can be measured between every pair of layers.
 
 | Script               | Model          | Sizes                          | Per window |
 |----------------------|----------------|--------------------------------|------------|
-| `extract_videomae.py`| VideoMAE       | base / large                   | 16 frames (uniform downsample) |
+| `extract_videomae.py`| VideoMAE (pretrained) | base / large            | 16 frames (uniform downsample) |
+| `extract_videomae_ft_kinetics.py` | VideoMAE (Kinetics-400 fine-tuned) | base / large / huge | 16 frames (uniform downsample) |
 | `extract_dinov2.py`  | DINOv2         | small / base / large / giant   | 1 frame per second |
 | `extract_vjepa2.py`  | V-JEPA 2       | large / huge / giant           | all native 8 fps frames |
 
-All three download `videos.tar` (2.59 GB) from HuggingFace once, extract clips locally,
+All scripts download `videos.tar` (2.59 GB) from HuggingFace once, extract clips locally,
 then produce one NPZ per `(size, eeg_family)`. EEG families:
 `femba_luna` (5 s), `steegformer` (6 s), `neurolm` (8 s), `reve` (10 s).
+
+`extract_videomae_ft_kinetics.py` uses `MCG-NJU/videomae-{base,large,huge}-finetuned-kinetics`.
+The classification head is stripped and only the encoder backbone is extracted, identical
+in shape and semantics to the pretrained-only NPZs. Output files are named
+`videomae_ft_kinetics_{size}__{eeg_family}.npz`. This is the checkpoint set used by
+Gröger et al. (2026) for the VideoMAE huge model (no pretrained-only huge exists).
 
 ### V-JEPA 2 details
 
@@ -99,9 +106,16 @@ python extract_vjepa2.py   --eeg-family steegformer --window-seconds 6
 python extract_vjepa2.py   --eeg-family neurolm     --window-seconds 8
 python extract_vjepa2.py   --eeg-family reve        --window-seconds 10
 
+# VideoMAE Kinetics-finetuned (base / large / huge — all three sizes)
+python extract_videomae_ft_kinetics.py --eeg-family femba_luna  --window-seconds 5
+python extract_videomae_ft_kinetics.py --eeg-family steegformer --window-seconds 6
+python extract_videomae_ft_kinetics.py --eeg-family neurolm     --window-seconds 8
+python extract_videomae_ft_kinetics.py --eeg-family reve        --window-seconds 10
+
 # Single size or half-precision (recommended for huge / giant on tight VRAM):
-python extract_vjepa2.py   --eeg-family neurolm     --window-seconds 8  --size large
-python extract_vjepa2.py   --eeg-family reve        --window-seconds 10 --dtype fp16
+python extract_vjepa2.py              --eeg-family neurolm     --window-seconds 8  --size large
+python extract_vjepa2.py              --eeg-family reve        --window-seconds 10 --dtype fp16
+python extract_videomae_ft_kinetics.py --eeg-family neurolm    --window-seconds 8  --size huge
 ```
 
 ## Notes
