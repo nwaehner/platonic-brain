@@ -1,0 +1,12 @@
+# Minimal requirements to run extract_llm_captions.py only.
+# Install torch separately with the correct CUDA index URL, e.g.:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# Then:
+#   pip install -r requirements_for_llm_captions.txt
+
+numpy>=1.24
+transformers>=4.40
+requests
+sentencepiece      # required by OpenLLaMA tokenizer
+accelerate         # recommended for large model loading (bloomz-7b1, openllama-13b)
+huggingface_hub    # for HF_TOKEN env-var auth if dataset is gated

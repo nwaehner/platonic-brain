@@ -63,6 +63,77 @@ patch tokens (`tubelet_size=2`, `patch_size=16`, input resolution 256×256).
 Output shape: `(n_layers, W, D)` — large: 24 layers / D=1024, huge: 32 / 1280,
 giant: 40 / 1408.
 
+## LLM text extractors (caption embeddings)
+
+`extract_llm_captions.py` extracts layerwise embeddings from BLOOM and OpenLLaMA
+using the CineBrain Qwen-2.5-VL-7B captions (`captions-qwen-2.5-vl-7b.json`),
+**aligned to NeuroLM 8-second windows**.
+
+Methodology follows [Gröger et al. (2026)](https://arxiv.org/abs/2602.14486) exactly:
+`AutoModelForCausalLM` with `output_hidden_states=True`, left-padding, masked mean-pooling.
+Two consecutive 4-second captions are concatenated per window (matching the 8 s NeuroLM stimulus).
+
+Output: `embeddings/<model>_layerwise.npz`, shape `(n_layers, W=1350, D)` —
+one embedding per NeuroLM window, no subjects dimension.
+
+| Model family | HuggingFace IDs | `n_layers` | D | VRAM (bf16) |
+|---|---|---|---|---|
+| bloomz-560m  | `bigscience/bloomz-560m`  | 25 | 1024 | ~1 GB |
+| bloomz-1b1   | `bigscience/bloomz-1b1`   | 25 | 1536 | ~2 GB |
+| bloomz-1b7   | `bigscience/bloomz-1b7`   | 25 | 2048 | ~3 GB |
+| bloomz-3b    | `bigscience/bloomz-3b`    | 31 | 2560 | ~6 GB |
+| bloomz-7b1   | `bigscience/bloomz-7b1`   | 31 | 4096 | ~14 GB |
+| open_llama_3b  | `openlm-research/open_llama_3b`  | 27 | 3200 | ~6 GB |
+| open_llama_7b  | `openlm-research/open_llama_7b`  | 33 | 4096 | ~14 GB |
+| open_llama_13b | `openlm-research/open_llama_13b` | 41 | 5120 | ~26 GB |
+
+### Minimal install (LLM script only)
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cu124
+pip install -r src/extraction_scripts/requirements_for_llm_captions.txt
+```
+
+### Running
+
+```bash
+cd src/extraction_scripts
+
+# Check caption statistics (no model loaded — run this first)
+python extract_llm_captions.py --stats
+
+# Quick smoke test — 50 random windows, no file saved
+python extract_llm_captions.py --model bigscience/bloomz-560m --test
+
+# Single model
+python extract_llm_captions.py --model bigscience/bloomz-560m
+python extract_llm_captions.py --model bigscience/bloomz-1b1
+python extract_llm_captions.py --model bigscience/bloomz-1b7
+python extract_llm_captions.py --model bigscience/bloomz-3b
+python extract_llm_captions.py --model bigscience/bloomz-7b1
+
+python extract_llm_captions.py --model openlm-research/open_llama_3b
+python extract_llm_captions.py --model openlm-research/open_llama_7b
+python extract_llm_captions.py --model openlm-research/open_llama_13b
+
+# All bloomz sizes in one call (560m → 7b1 sequentially)
+python extract_llm_captions.py --all-bloom
+
+# All OpenLLaMA sizes in one call (3b → 13b sequentially)
+python extract_llm_captions.py --all-openllama
+
+# Large models — reduce batch size to avoid OOM (default is 8)
+python extract_llm_captions.py --model bigscience/bloomz-7b1   --batch-size 2
+python extract_llm_captions.py --model openlm-research/open_llama_13b --batch-size 1
+
+# Custom output directory and device
+python extract_llm_captions.py --all-bloom --out-dir /data/embeddings --device cuda:1
+```
+
+The captions JSON is downloaded automatically from HuggingFace on first run and
+cached at `data/captions-qwen-2.5-vl-7b.json` (override with `--caption-cache`).
+Set `HF_TOKEN` env var if the dataset requires authentication.
+
 ## Setup
 
 ```bash
