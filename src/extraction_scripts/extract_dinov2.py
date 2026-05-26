@@ -7,7 +7,8 @@ of any length. For each EEG window of D seconds the script:
      (8100 clips, each clip = 4 s),
   2. Concatenates the relevant frames (whole and/or partial clips),
   3. Uniformly samples **D frames (1 frame per second)**,
-  4. Runs each frame through DINOv2 with output_hidden_states=True,
+  4. Runs each frame through DINOv2 and captures per-block CLS tokens via
+     forward hooks,
   5. For every transformer block: takes the CLS token (sequence position 0),
      then averages it across the frames of the window → one (D_emb,) vector
      per layer per window.
@@ -16,15 +17,25 @@ The CLS token is used (not mean-pooled patch tokens) to match the protocol of
 Huh et al. 2024 (platonic-rep), which pools ViT features as ``v[:, 0, :]`` per
 layer; the Aristotelian paper follows that same protocol.
 
+Model and preprocessing match the Aristotelian paper (Attias et al. 2024)
+exactly:
+  - timm models: vit_{small,base,large,giant}_patch14_dinov2.lvd142m
+  - loaded with timm.create_model(name, pretrained=True, num_classes=0)
+  - preprocessing: timm.data.resolve_data_config + create_transform (eval mode)
+  - native DINOv2 resolution: 518×518 (patch_size=14 → 37×37 patch grid,
+    no positional embedding interpolation)
+  - layerwise extraction via forward hooks (not get_intermediate_layers, which
+    has ordering issues in timm ≤1.0.26)
+
 So the output is layerwise — shape (n_layers, W, D_emb) — mirroring the EEG
 extractors' (n_layers, W, S, D), so cross-modal alignment can be measured
 between every pair of layers (DINOv2 layer i ↔ EEG-model layer j), as done in
 the Platonic / Aristotelian representation-alignment papers, rather than only
 against a single (last) layer.
 
-n_layers = model.config.num_hidden_layers (the encoder-block outputs;
-hidden_states[0], the input-embedding output, is dropped — matching the EEG
-extractors, which capture post-block hidden states only).
+n_layers = len(model.blocks) (all transformer block outputs; no embedding-layer
+output is included — matching the EEG extractors which capture post-block
+hidden states only).
 
 DINOv2 is a purely spatial image model; no temporal modeling is performed.
 Cross-modal alignment with EEG/video models reflects static scene content only.
@@ -83,7 +94,7 @@ Disk space:
     ~2.6 GB cached tar + ~2.6 GB extracted clips ≈ 5.2 GB on first run.
 
 Requirements:
-    pip install opencv-python transformers torch numpy huggingface_hub
+    pip install timm torch numpy opencv-python pillow huggingface_hub
 """
 
 from __future__ import annotations
@@ -91,15 +102,32 @@ from __future__ import annotations
 import argparse
 import gc
 import os
+import ssl
 import tarfile
 import time
 from functools import lru_cache
 from pathlib import Path
 
+# Windows SSL fix — must run before any network import
+ssl._create_default_https_context = ssl._create_unverified_context
+os.environ.setdefault("CURL_CA_BUNDLE", "")
+os.environ.setdefault("REQUESTS_CA_BUNDLE", "")
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+import requests as _requests
+_orig_request = _requests.Session.request
+def _no_verify(self, method, url, **kwargs):
+    kwargs.setdefault("verify", False)
+    return _orig_request(self, method, url, **kwargs)
+_requests.Session.request = _no_verify
+
 import cv2
 import numpy as np
 import torch
-from transformers import AutoImageProcessor, AutoModel
+import timm
+from PIL import Image
+from timm.data import resolve_data_config
+from timm.data.transforms_factory import create_transform
 
 # ── HuggingFace dataset configuration ────────────────────────────────────────
 HF_DATASET_REPO = "Fudan-fMRI/CineBrain"
@@ -118,14 +146,18 @@ CLIP_SECONDS = 4.0                               # each clip is 4 s long
 MAX_CLIP_IDX = 2699
 SEASON_END_SEC = (MAX_CLIP_IDX + 1) * CLIP_SECONDS    # 10800 s
 
-HF_MODELS = {
-    "small": "facebook/dinov2-small",
-    "base":  "facebook/dinov2-base",
-    "large": "facebook/dinov2-large",
-    "giant": "facebook/dinov2-giant",
+# timm model names matching the Aristotelian paper (Attias et al. 2024)
+TIMM_MODELS = {
+    "small": "vit_small_patch14_dinov2.lvd142m",
+    "base":  "vit_base_patch14_dinov2.lvd142m",
+    "large": "vit_large_patch14_dinov2.lvd142m",
+    "giant": "vit_giant_patch14_dinov2.lvd142m",
 }
 
-FRAME_SIZE = 224   # DINOv2 default spatial resolution
+# Native DINOv2 training resolution: patch_size=14, 37×37 patch grid → 518 px.
+# Using native resolution avoids positional embedding interpolation, matching
+# the Aristotelian and Platonic-rep paper protocols.
+FRAME_SIZE = 518
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -212,7 +244,7 @@ def _resolve_clip_path(clip_idx: int) -> Path:
 def _load_clip_frames(clip_idx: int) -> tuple:
     """
     Decode all frames of clip clip_idx. Returns an immutable tuple of
-    (H, W, 3) uint8 RGB arrays at FRAME_SIZE × FRAME_SIZE.
+    (FRAME_SIZE, FRAME_SIZE, 3) uint8 RGB arrays.
     lru_cache reuses results for adjacent windows that share clips.
     """
     path = _resolve_clip_path(clip_idx)
@@ -294,29 +326,46 @@ def _sample_uniform(frames: list[np.ndarray], n: int) -> list[np.ndarray]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DINOv2 forward pass  (per-frame CLS, then mean across frames)
+# DINOv2 forward pass  (per-frame CLS via hooks, then mean across frames)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _embed_frames(processor, model, device, frames: list[np.ndarray]) -> np.ndarray:
+def _embed_frames(
+    transform,
+    model: torch.nn.Module,
+    device: torch.device,
+    frames: list[np.ndarray],
+) -> np.ndarray:
     """
-    Batch all frames through DINOv2 in one forward pass with hidden states.
-    For each transformer block, take the CLS token (sequence position 0) and
-    average it over the window's frames. Returns (n_layers, D); n_layers =
-    num_hidden_layers (the input embedding output hidden_states[0] is dropped,
-    matching the EEG extractors which capture post-block hidden states only).
+    Batch all frames through DINOv2 and capture per-block CLS tokens via
+    forward hooks. For each transformer block, average the CLS token over the
+    window's frames. Returns (n_layers, D); n_layers = len(model.blocks).
 
-    Uses the CLS token to match Huh et al. 2024 (platonic-rep), which pools ViT
-    features as ``v[:, 0, :]`` per layer. To mean-pool the patch tokens instead,
-    replace ``h[:, 0, :]`` with ``h[:, 1:, :].mean(dim=1)``.
+    Forward hooks are used instead of get_intermediate_layers() because timm
+    <=1.0.26's list-argument form has unexpected output ordering.
+
+    Uses the CLS token to match Huh et al. 2024 (platonic-rep) and the
+    Aristotelian paper (Attias et al. 2024), which pool ViT features as
+    ``v[:, 0, :]`` per layer.
     """
-    inputs = processor(images=frames, return_tensors="pt").to(device)
+    # frames are (FRAME_SIZE, FRAME_SIZE, 3) uint8 RGB numpy arrays
+    imgs = torch.stack([transform(Image.fromarray(f)) for f in frames]).to(device)
+
+    hook_cls: list[torch.Tensor] = []
+    hooks = [
+        blk.register_forward_hook(
+            lambda m, inp, out: hook_cls.append(out[:, 0, :].detach())
+        )
+        for blk in model.blocks
+    ]
     with torch.no_grad():
-        out = model(**inputs, output_hidden_states=True)
-    # out.hidden_states: tuple of (num_hidden_layers + 1) tensors,
-    # each (n_frames, 1 + n_patches, D)
-    layers = out.hidden_states[1:]
-    pooled = [h[:, 0, :].mean(dim=0) for h in layers]   # CLS per layer, avg over frames → (D,)
-    return torch.stack(pooled, dim=0).cpu().float().numpy()          # (n_layers, D)
+        model(imgs)
+    for h in hooks:
+        h.remove()
+
+    # hook_cls: list of (n_frames, D) tensors, one per block in order
+    # mean over frames per block → (D,); stack blocks → (n_layers, D)
+    pooled = [cls.mean(dim=0) for cls in hook_cls]
+    return torch.stack(pooled, dim=0).cpu().float().numpy()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -343,9 +392,12 @@ def run(
     W        = len(starts_s)
     last_end = float(starts_s[-1]) + window_seconds
 
+    model_name = TIMM_MODELS[size]
     print(f"\n{'='*72}")
     print(f"  DINOv2-{size}  |  window={window_seconds} s "
           f"({window_seconds / CLIP_SECONDS:.2f} clips, {n_frames} frames @ 1 fps)")
+    print(f"  timm model : {model_name}")
+    print(f"  resolution : {FRAME_SIZE}x{FRAME_SIZE} (native, no pos-embed interpolation)")
     print(f"  EEG family : {eeg_family}")
     print(f"  output     : {out_path.name}")
     print(f"  windows={W}  device={device}")
@@ -354,13 +406,16 @@ def run(
     print(f"  embedding[i] will correspond 1-to-1 with EEG window i.")
     print(f"{'='*72}")
 
-    print(f"  Loading {HF_MODELS[size]}...")
+    print(f"  Loading {model_name} ...")
     t0        = time.time()
-    processor = AutoImageProcessor.from_pretrained(HF_MODELS[size])
-    model     = AutoModel.from_pretrained(HF_MODELS[size]).to(device).eval()
-    D         = model.config.hidden_size
-    n_layers  = model.config.num_hidden_layers
+    model     = timm.create_model(model_name, pretrained=True, num_classes=0).to(device).eval()
+    data_cfg  = resolve_data_config(model.pretrained_cfg, model=model)
+    transform = create_transform(**data_cfg, is_training=False)
+    n_layers  = len(model.blocks)
+    D         = model.embed_dim
     print(f"  Loaded in {time.time() - t0:.1f} s  |  n_layers={n_layers}  D={D}")
+    print(f"  timm data config: input_size={data_cfg['input_size']}  "
+          f"mean={data_cfg['mean']}  std={data_cfg['std']}")
 
     embeddings = np.zeros((n_layers, W, D), dtype=np.float32)
     t_loop     = time.time()
@@ -370,7 +425,7 @@ def run(
         if len(frames) == 0:
             raise RuntimeError(f"No frames for window {w_idx} at t={start_sec:.2f}s")
         sampled               = _sample_uniform(frames, n_frames)
-        embeddings[:, w_idx]  = _embed_frames(processor, model, device, sampled)
+        embeddings[:, w_idx]  = _embed_frames(transform, model, device, sampled)
 
         if (w_idx + 1) % 50 == 0 or w_idx + 1 == W:
             elapsed = time.time() - t_loop
@@ -390,6 +445,8 @@ def run(
         n_layers        = n_layers,
         n_frames        = n_frames,
         eeg_family      = eeg_family,
+        timm_model      = model_name,
+        frame_size      = FRAME_SIZE,
     )
     print(f"\n  Saved {embeddings.shape} (n_layers, W, D) → {out_path.name}")
 
@@ -409,7 +466,7 @@ def main() -> None:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     ap.add_argument(
-        "--size", choices=list(HF_MODELS), default=None,
+        "--size", choices=list(TIMM_MODELS), default=None,
         help="Model size. Omit to run all four (small, base, large, giant).",
     )
     ap.add_argument(
@@ -441,7 +498,7 @@ def main() -> None:
         else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     )
 
-    sizes = [args.size] if args.size else list(HF_MODELS)
+    sizes = [args.size] if args.size else list(TIMM_MODELS)
     for size in sizes:
         run(size, args.eeg_family, args.window_seconds, out_dir, device)
 
