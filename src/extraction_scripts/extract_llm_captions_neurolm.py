@@ -283,6 +283,9 @@ def load_text_model(model_name: str, device: str):
         model = AutoModelForCausalLM.from_pretrained(
             model_name, output_hidden_states=True, torch_dtype=torch_dtype
         )
+    # Ensure hidden states are returned on forward pass (transformers 5.x moved
+    # output_hidden_states to GenerationConfig; set it on model.config too).
+    model.config.output_hidden_states = True
 
     model.to(device)
     model.eval()

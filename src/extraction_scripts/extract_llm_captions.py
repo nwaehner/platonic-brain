@@ -74,8 +74,7 @@ WINDOW_SCHEMES = {
 # Original LLaMA weights (the "33b" checkpoint ships as llama-30b).
 LLAMA_MODELS = [
     "huggyllama/llama-13b",
-    "huggyllama/llama-30b",
-    "huggyllama/llama-65b",
+    # llama-30b (~60 GB bf16) and llama-65b (~130 GB bf16) OOM on L40S 48 GB
 ]
 
 
