@@ -333,7 +333,7 @@ def _embed_frames(processor, model, device, dtype, frames: list[np.ndarray]) -> 
 # Run
 # ─────────────────────────────────────────────────────────────────────────────
 
-EEG_FAMILIES = ("femba_luna", "steegformer", "neurolm", "reve")
+EEG_FAMILIES = ("femba_luna", "steegformer", "neurolm", "reve", "clip4s")
 
 _TORCH_DTYPES = {
     "fp32": torch.float32,

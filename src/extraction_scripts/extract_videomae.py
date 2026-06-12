@@ -313,7 +313,7 @@ def _embed_frames(processor, model, device, frames: list[np.ndarray]) -> np.ndar
 # Run
 # ─────────────────────────────────────────────────────────────────────────────
 
-EEG_FAMILIES = ("femba_luna", "steegformer", "neurolm", "reve")
+EEG_FAMILIES = ("femba_luna", "steegformer", "neurolm", "reve", "clip4s")
 
 def run(
     size: str,

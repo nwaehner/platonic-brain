@@ -372,7 +372,7 @@ def _embed_frames(
 # Run
 # ─────────────────────────────────────────────────────────────────────────────
 
-EEG_FAMILIES = ("femba_luna", "steegformer", "neurolm", "reve")
+EEG_FAMILIES = ("femba_luna", "steegformer", "neurolm", "reve", "clip4s")
 
 def run(
     size: str,
