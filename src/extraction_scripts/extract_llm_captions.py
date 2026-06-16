@@ -79,6 +79,22 @@ LLAMA_MODELS = [
     # llama-30b (~60 GB bf16) and llama-65b (~130 GB bf16) OOM on L40S 48 GB
 ]
 
+# Per-model batch size (L40S 48 GB, bf16, output_hidden_states retains all layers).
+# Captions are short (~80-250 tokens), so the small models leave the GPU idle at bs=2 —
+# bigger batches cut their wall-clock several-fold. The 13B models stay at bs=2 (VRAM).
+# Used only when --batch-size is not given explicitly.
+_BATCH_BY_STEM = {
+    "bloomz-560m": 32, "bloomz-1b1": 32, "bloomz-1b7": 32,
+    "bloomz-3b": 16, "open_llama_3b": 16,
+    "bloomz-7b1": 8, "open_llama_7b": 8,
+    "open_llama_13b": 2, "llama-13b": 2,
+    "llama-30b": 1, "llama-65b": 1,
+}
+
+
+def _auto_batch(model_name):
+    return _BATCH_BY_STEM.get(neuro._model_stem(model_name), 8)
+
 
 def overlapping_captions(w, win_sec):
     """Caption indices whose [4c, 4c+4) interval overlaps window [wL, (w+1)L)."""
@@ -252,7 +268,8 @@ def parse_args():
                    help="Print caption/window statistics only (no model loaded).")
     ap.add_argument("--out-dir", default="embeddings/llms", metavar="PATH")
     ap.add_argument("--caption-cache", default="data/captions-qwen-2.5-vl-7b.json")
-    ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--batch-size", type=int, default=None,
+                    help="override per-model auto batch (see _BATCH_BY_STEM)")
     ap.add_argument("--max-length", type=int, default=None)
     ap.add_argument("--device", default=None)
     ap.add_argument("--test", action="store_true")
@@ -289,8 +306,11 @@ def main():
     out_dir = Path(args.out_dir).expanduser().resolve()
     print(f"Device : {device}\nOutput : {out_dir}/{args.eeg_model}/\nModels : {models}")
     for m in models:
+        bs = args.batch_size if args.batch_size is not None else _auto_batch(m)
+        print(f"  [batch] {neuro._model_stem(m)}: batch_size={bs}"
+              f"{' (auto)' if args.batch_size is None else ' (override)'}")
         run(m, texts, n_caps, win_sec, args.eeg_model, out_dir, device,
-            args.batch_size, args.max_length, args.test)
+            bs, args.max_length, args.test)
     print("\nDone.")
 
 
