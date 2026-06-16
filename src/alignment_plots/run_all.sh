@@ -117,7 +117,7 @@ PY
     for fam in $LLM_FAMILIES; do
       echo "-- llm  $eeg × $fam --"
       $PY src/extraction_scripts/extract_llm_captions.py \
-          --eeg-model "$eeg" --all-"$fam" --out-dir "$EMB_LLM" --batch-size 2 $EXTRACT_FLAG
+          --eeg-model "$eeg" --all-"$fam" --out-dir "$EMB_LLM" $EXTRACT_FLAG
     done
   done
 fi
