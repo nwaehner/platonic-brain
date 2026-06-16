@@ -80,14 +80,44 @@ if [ "${SKIP_BPB:-0}" != "1" ]; then
   $PY src/extraction_scripts/measure_llm_bpb.py --all $BPB_FLAG
 fi
 
-# ── [2] LLM caption embeddings: LLM_SCHEMES × LLM_FAMILIES ──────────────────────
+# ── [2] LLM caption embeddings → HuggingFace (upload each file, delete local after) ─
+# extract_llm_captions.py (with PLATONIC_HF_UPLOAD set) writes each .npz to the
+# PERSISTENT --out-dir, uploads it to HF, VERIFIES it, then deletes the local copy — so a
+# wiped scratch disk can never lose work. FEMBA↔LUNA share one 5 s/2160-window tiling:
+# computed once and copied to the twin automatically (no second forward pass).
+# IMPORTANT: keep PLATONIC_LOCAL_DIR on the persistent disk (NOT ephemeral /scratch).
 if [ "${SKIP_EXTRACT:-0}" != "1" ]; then
-  banner "[2/4] extract_llm_captions"
+  banner "[2/4] extract_llm_captions → HF"
+  export PLATONIC_HF_UPLOAD="${HF_REPO_ID:-nitrox639/platonic-embeddings}"
+  echo "upload target = $PLATONIC_HF_UPLOAD   local(persistent) = $EMB_LLM"
+
+  # pre-flight inventory: exactly what is already on HF vs still missing
+  $PY - "$PLATONIC_HF_UPLOAD" "$LLM_SCHEMES" "$LLM_FAMILIES" <<'PY' || true
+import sys
+from huggingface_hub import HfApi
+repo, schemes, fams = sys.argv[1], sys.argv[2].split(), sys.argv[3].split()
+LLM = {"bloom":["bloomz-560m","bloomz-1b1","bloomz-1b7","bloomz-3b","bloomz-7b1"],
+       "openllama":["open_llama_3b","open_llama_7b","open_llama_13b"],
+       "llama":["llama-13b"]}
+stems = [s for f in fams for s in LLM.get(f, [])]
+have = set(f for f in HfApi().list_repo_files(repo, repo_type="dataset") if f.startswith("llms/"))
+tot = miss = 0
+print(f"[2] INVENTORY on {repo}  (FEMBA=LUNA, luna copied from femba):")
+for sch in schemes:
+    cells = []
+    for st in stems:
+        ok = f"llms/{sch}/{st}_layerwise.npz" in have
+        tot += 1; miss += 0 if ok else 1
+        cells.append(f"{st}{'·OK' if ok else '·MISSING'}")
+    print(f"   {sch:12s} " + "  ".join(cells))
+print(f"[2] {tot-miss}/{tot} already on HF · up to {miss} to produce (luna twins copied, not recomputed)")
+PY
+
   for eeg in $LLM_SCHEMES; do
     for fam in $LLM_FAMILIES; do
       echo "-- llm  $eeg × $fam --"
       $PY src/extraction_scripts/extract_llm_captions.py \
-          --eeg-model "$eeg" --all-"$fam" --out-dir "$EMB_LLM" $EXTRACT_FLAG
+          --eeg-model "$eeg" --all-"$fam" --out-dir "$EMB_LLM" --batch-size 2 $EXTRACT_FLAG
     done
   done
 fi

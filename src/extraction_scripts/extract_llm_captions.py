@@ -42,7 +42,9 @@ from __future__ import annotations
 
 import argparse
 import gc
+import os
 import random
+import shutil
 import time
 from pathlib import Path
 from typing import List, Optional
@@ -102,6 +104,81 @@ def build_window_texts(captions: List[str], win_sec: int, n_windows: int):
     return texts, n_caps
 
 
+# ── HuggingFace "upload-as-soon-as-computed, delete-only-after-verified" ────────
+# Enabled by env PLATONIC_HF_UPLOAD (="1" → default repo, or an explicit repo id).
+# Saves stay on the PERSISTENT --out-dir; each .npz is pushed to HF and removed ONLY
+# after the upload is confirmed present, so a wiped scratch disk can never lose work.
+_HF_REPO_DEFAULT = "nitrox639/platonic-embeddings"
+_HF_FILES_CACHE = None
+
+
+def _hf_repo():
+    v = os.environ.get("PLATONIC_HF_UPLOAD")
+    return None if not v else (_HF_REPO_DEFAULT if v == "1" else v)
+
+
+def _hf_api():
+    from huggingface_hub import HfApi
+    return HfApi(token=os.environ.get("HF_TOKEN"))
+
+
+def _hf_files(api, repo, refresh=False):
+    global _HF_FILES_CACHE
+    if _HF_FILES_CACHE is None or refresh:
+        _HF_FILES_CACHE = set(api.list_repo_files(repo, repo_type="dataset"))
+    return _HF_FILES_CACHE
+
+
+def _twin_schemes(eeg_model):
+    """Other schemes whose window tiling is byte-identical (same win_sec & n_windows),
+    so the captions — and therefore the embeddings — are identical. FEMBA↔LUNA (5 s)."""
+    me = WINDOW_SCHEMES[eeg_model]
+    return [s for s, w in WINDOW_SCHEMES.items()
+            if s != eeg_model and (w["win_sec"], w["n_windows"]) == (me["win_sec"], me["n_windows"])]
+
+
+def _all_on_hf(eeg_model, stem):
+    repo = _hf_repo()
+    if not repo:
+        return False
+    files = _hf_files(_hf_api(), repo)
+    return all(f"llms/{s}/{stem}_layerwise.npz" in files
+               for s in [eeg_model] + _twin_schemes(eeg_model))
+
+
+def _upload_then_delete(out_path, eeg_model, stem, test):
+    """Upload out_path (and its window-twins) to HF, verify, then delete local copies."""
+    repo = _hf_repo()
+    if not repo or test:
+        return
+    api = _hf_api()
+    files = _hf_files(api, repo)
+    for tgt in [eeg_model] + _twin_schemes(eeg_model):
+        src = out_path
+        if tgt != eeg_model:                       # window-twin: copy, don't recompute
+            src = out_path.parent.parent / tgt / out_path.name
+            src.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(out_path, src)
+            print(f"  [hf] copy {eeg_model}→{tgt} (identical "
+                  f"{WINDOW_SCHEMES[tgt]['win_sec']}s window): {stem}")
+        dest = f"llms/{tgt}/{out_path.name}"
+        if dest in files:
+            print(f"  [hf] already on HF: {dest}")
+        else:
+            print(f"  [hf] UPLOAD → {repo}:{dest}  ({src.stat().st_size/1e6:.0f} MB)")
+            api.upload_file(path_or_fileobj=str(src), path_in_repo=dest, repo_id=repo,
+                            repo_type="dataset", commit_message=f"step2: {tgt} × {stem}")
+            files = _hf_files(api, repo, refresh=True)      # re-list to VERIFY presence
+            if dest not in files:
+                raise RuntimeError(f"[hf] verify FAILED for {dest} — keeping local copy")
+            print(f"  [hf] verified on HF: {dest}")
+        if tgt != eeg_model:
+            src.unlink()
+    if os.environ.get("PLATONIC_KEEP_LOCAL") != "1":
+        out_path.unlink()
+        print(f"  [hf] deleted local {out_path} (safe: verified on HF)")
+
+
 def run(model_name, texts, n_caps, win_sec, eeg_model, out_dir, device,
         batch_size, max_length, test):
     stem = neuro._model_stem(model_name)
@@ -109,7 +186,16 @@ def run(model_name, texts, n_caps, win_sec, eeg_model, out_dir, device,
     model_dir = out_dir / eeg_model
     out_path = model_dir / f"{stem}{suffix}.npz"
     if out_path.exists():
-        print(f"\n  {out_path} already exists — skipping.")
+        # already computed locally — upload+remove it if HF mode is on, else just skip
+        if _hf_repo() and not test:
+            print(f"\n  {out_path} exists locally — uploading then removing.")
+            _upload_then_delete(out_path, eeg_model, stem, test)
+        else:
+            print(f"\n  {out_path} already exists — skipping.")
+        return
+    if not test and _all_on_hf(eeg_model, stem):
+        print(f"\n  llms/{eeg_model}/{stem}_layerwise.npz already on HF "
+              f"(+ twins {_twin_schemes(eeg_model)}) — skipping compute.")
         return
 
     n_windows = len(texts)
@@ -147,6 +233,9 @@ def run(model_name, texts, n_caps, win_sec, eeg_model, out_dir, device,
     gc.collect()
     if "cuda" in str(device) and torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+    # VRAM freed above; now push to HF and delete the local copy once verified.
+    _upload_then_delete(out_path, eeg_model, stem, test)
 
 
 def parse_args():
