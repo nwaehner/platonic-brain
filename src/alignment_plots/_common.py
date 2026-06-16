@@ -76,6 +76,10 @@ plt.rcParams.update(
 
 # ── HuggingFace auth ───────────────────────────────────────────────────────────
 REPO = "nitrox639/platonic-embeddings"
+# LLM caption embeddings (llms/…) live in a SEPARATE, writable dataset — the nitrox639
+# repo is read-only for us. eeg/ and vision/ still load from REPO; only llms/ is
+# redirected here. Override with PLATONIC_LLM_REPO.
+LLM_REPO = os.environ.get("PLATONIC_LLM_REPO", "triniborrell/platonic-embeddings")
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _TOKEN_CANDIDATES = [
@@ -111,7 +115,8 @@ def fetch(p):
         local = Path(LOCAL_DIR).expanduser() / p
         if local.exists():
             return str(local)
-    return hf_hub_download(REPO, p, repo_type="dataset", token=HF_TOKEN_CACHE)
+    repo = LLM_REPO if p.startswith("llms/") else REPO
+    return hf_hub_download(repo, p, repo_type="dataset", token=HF_TOKEN_CACHE)
 
 
 def load_npz(p):

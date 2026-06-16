@@ -88,7 +88,7 @@ fi
 # IMPORTANT: keep PLATONIC_LOCAL_DIR on the persistent disk (NOT ephemeral /scratch).
 if [ "${SKIP_EXTRACT:-0}" != "1" ]; then
   banner "[2/4] extract_llm_captions → HF"
-  export PLATONIC_HF_UPLOAD="${HF_REPO_ID:-nitrox639/platonic-embeddings}"
+  export PLATONIC_HF_UPLOAD="${HF_REPO_ID:-${PLATONIC_LLM_REPO:-triniborrell/platonic-embeddings}}"
   echo "upload target = $PLATONIC_HF_UPLOAD   local(persistent) = $EMB_LLM"
 
   # pre-flight inventory: exactly what is already on HF vs still missing
