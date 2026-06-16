@@ -294,6 +294,11 @@ def llm_x(stem):
     v = LLM_PERF.get(stem)
     if v is not None:
         return float(v)
+    if not llm_x_is_proxy():
+        raise ValueError(
+            f"{stem}: no measured 1-BPB but other LLMs have one — would mix a log-param "
+            f"proxy (~{np.log10(LLM_PARAMS[stem]):.1f}) with measured 1-BPB (~0-0.3) on the "
+            f"same axis. Run measure_llm_bpb.py for {stem}, or drop it from the plot.")
     return float(np.log10(LLM_PARAMS[stem]))
 
 
