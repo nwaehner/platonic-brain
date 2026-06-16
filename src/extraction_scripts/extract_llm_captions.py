@@ -236,8 +236,14 @@ def run(model_name, texts, n_caps, win_sec, eeg_model, out_dir, device,
     t0 = time.time()
     tokenizer, model = neuro.load_text_model(model_name, device)
     print(f"  Model ready in {time.time()-t0:.1f}s; extracting...")
-    embeddings = neuro.collect_text_activations(
-        sub_texts, tokenizer, model, device, batch_size, max_length)
+    try:
+        embeddings = neuro.collect_text_activations(
+            sub_texts, tokenizer, model, device, batch_size, max_length)
+    except torch.cuda.OutOfMemoryError:
+        torch.cuda.empty_cache()
+        print(f"  OOM at batch_size={batch_size} — retrying at batch_size=2 (safe).")
+        embeddings = neuro.collect_text_activations(
+            sub_texts, tokenizer, model, device, 2, max_length)
     print(f"  shape {embeddings.shape}")
 
     model_dir.mkdir(parents=True, exist_ok=True)
