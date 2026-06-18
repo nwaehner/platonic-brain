@@ -124,14 +124,22 @@ def build_window_texts(captions: List[str], win_sec: int, n_windows: int):
 # Enabled by env PLATONIC_HF_UPLOAD (="1" → default repo, or an explicit repo id).
 # Saves stay on the PERSISTENT --out-dir; each .npz is pushed to HF and removed ONLY
 # after the upload is confirmed present, so a wiped scratch disk can never lose work.
-# llms/ embeddings upload to a writable dataset (nitrox639 repo is read-only for us).
-_HF_REPO_DEFAULT = os.environ.get("PLATONIC_LLM_REPO", "triniborrell/platonic-embeddings")
 _HF_FILES_CACHE = None
 
 
 def _hf_repo():
+    """Target dataset for llms/ uploads. PLATONIC_HF_UPLOAD = a repo id, or "1" to use
+    PLATONIC_LLM_REPO. No hardcoded default — the repo must be configured (e.g. in .env)."""
     v = os.environ.get("PLATONIC_HF_UPLOAD")
-    return None if not v else (_HF_REPO_DEFAULT if v == "1" else v)
+    if not v:
+        return None
+    if v == "1":
+        repo = os.environ.get("PLATONIC_LLM_REPO")
+        if not repo:
+            raise SystemExit("PLATONIC_HF_UPLOAD=1 requires PLATONIC_LLM_REPO "
+                             "(the dataset to upload llms/ to). Set it in .env or the env.")
+        return repo
+    return v
 
 
 def _hf_api():

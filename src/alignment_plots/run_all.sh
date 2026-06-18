@@ -28,6 +28,10 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
+# Load local config (HF_TOKEN, PLATONIC_LLM_REPO, …) from .env if present (gitignored,
+# so personal repo ids / tokens stay out of the committed code).
+[ -f "$ROOT/.env" ] && { set -a; . "$ROOT/.env"; set +a; }
+
 PY="${PY:-python}"
 EEG_MODELS="${EEG_MODELS:-neurolm femba luna steegformer reve}"
 LLM_FAMILIES="${LLM_FAMILIES:-bloom openllama llama}"
@@ -88,7 +92,15 @@ fi
 # IMPORTANT: keep PLATONIC_LOCAL_DIR on the persistent disk (NOT ephemeral /scratch).
 if [ "${SKIP_EXTRACT:-0}" != "1" ]; then
   banner "[2/4] extract_llm_captions → HF"
-  export PLATONIC_HF_UPLOAD="${HF_REPO_ID:-${PLATONIC_LLM_REPO:-triniborrell/platonic-embeddings}}"
+  # Dataset to upload llms/ to — configured via env/.env, not hardcoded.
+  : "${PLATONIC_LLM_REPO:=${HF_REPO_ID:-}}"
+  if [ -z "${PLATONIC_LLM_REPO:-}" ]; then
+    echo "ERROR: PLATONIC_LLM_REPO not set — the HF dataset to upload llms/ to."
+    echo "       Add 'PLATONIC_LLM_REPO=<user>/<dataset>' to .env (or export it)."
+    exit 1
+  fi
+  export PLATONIC_LLM_REPO                       # so the plot scripts read from the same place
+  export PLATONIC_HF_UPLOAD="$PLATONIC_LLM_REPO"
   echo "upload target = $PLATONIC_HF_UPLOAD   local(persistent) = $EMB_LLM"
 
   # pre-flight inventory: exactly what is already on HF vs still missing
