@@ -76,10 +76,11 @@ plt.rcParams.update(
 
 # ── HuggingFace auth ───────────────────────────────────────────────────────────
 REPO = "nitrox639/platonic-embeddings"
-# LLM caption embeddings (llms/…) live in a SEPARATE, writable dataset — the nitrox639
-# repo is read-only for us. eeg/ and vision/ still load from REPO; only llms/ is
-# redirected here. Override with PLATONIC_LLM_REPO.
-LLM_REPO = os.environ.get("PLATONIC_LLM_REPO", "triniborrell/platonic-embeddings")
+# Where the LLM caption embeddings (llms/…) live. Defaults to the same dataset as
+# eeg/ and vision/ (REPO); set PLATONIC_LLM_REPO (e.g. in .env) to redirect llms/ to a
+# separate dataset — needed when REPO is read-only for your token and you upload
+# llms/ to your own writable dataset. eeg/ and vision/ always load from REPO.
+LLM_REPO = os.environ.get("PLATONIC_LLM_REPO", REPO)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _TOKEN_CANDIDATES = [
