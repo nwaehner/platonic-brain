@@ -76,10 +76,10 @@ plt.rcParams.update(
 
 # ── HuggingFace auth ───────────────────────────────────────────────────────────
 REPO = "nitrox639/platonic-embeddings"
-# Where the LLM caption embeddings (llms/…) live. Defaults to the same dataset as
-# eeg/ and vision/ (REPO); set PLATONIC_LLM_REPO (e.g. in .env) to redirect llms/ to a
-# separate dataset — needed when REPO is read-only for your token and you upload
-# llms/ to your own writable dataset. eeg/ and vision/ always load from REPO.
+# Writable dataset for the embeddings WE generate (llms/ + the clip4s vision/). Defaults
+# to REPO; set PLATONIC_LLM_REPO (e.g. in .env) to redirect them to your own dataset —
+# needed when REPO is read-only for your token. The pre-existing eeg/ and the EEG-family
+# vision/ always load from REPO.
 LLM_REPO = os.environ.get("PLATONIC_LLM_REPO", REPO)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -116,7 +116,9 @@ def fetch(p):
         local = Path(LOCAL_DIR).expanduser() / p
         if local.exists():
             return str(local)
-    repo = LLM_REPO if p.startswith("llms/") else REPO
+    # llms/ and the clip4s vision/ are ours → LLM_REPO; eeg/ + EEG-family vision/ → REPO.
+    ours = p.startswith("llms/") or (p.startswith("vision/") and p.endswith("__clip4s.npz"))
+    repo = LLM_REPO if ours else REPO
     return hf_hub_download(repo, p, repo_type="dataset", token=HF_TOKEN_CACHE)
 
 

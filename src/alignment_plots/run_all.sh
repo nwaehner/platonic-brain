@@ -137,7 +137,17 @@ fi
 # ── [3] 4 s clip4s VIDEO embeddings (needed by video_vs_language clip4s) ────────
 # (the video extractors have no --test mode, so SMOKE skips this heavy stage)
 if [ "${SKIP_VIDEO:-0}" != "1" ] && [ "$HAS_CLIP4S" = "1" ] && [ "$SMOKE" != "1" ]; then
-  banner "[3/4] extract clip4s video (--eeg-family clip4s --window-seconds 4)"
+  banner "[3/4] extract clip4s video → HF (--eeg-family clip4s --window-seconds 4)"
+  # Same dataset as llms/ — the video extractors write to the PERSISTENT --out-dir; we
+  # then upload each .npz, VERIFY it, and delete the local copy (never before).
+  : "${PLATONIC_LLM_REPO:=${HF_REPO_ID:-}}"
+  if [ -z "${PLATONIC_LLM_REPO:-}" ]; then
+    echo "ERROR: PLATONIC_LLM_REPO not set — the HF dataset to upload clip4s vision/ to."
+    echo "       Add 'PLATONIC_LLM_REPO=<user>/<dataset>' to .env (or export it)."
+    exit 1
+  fi
+  export PLATONIC_LLM_REPO
+  echo "upload target = $PLATONIC_LLM_REPO   local(persistent) = $EMB_VIS"
   #   script                          → vision/<arch> subdir the loader expects
   for spec in \
     "extract_videomae.py:videomae" \
@@ -148,6 +158,25 @@ if [ "${SKIP_VIDEO:-0}" != "1" ] && [ "$HAS_CLIP4S" = "1" ] && [ "$SMOKE" != "1"
     echo "-- video  $script → $EMB_VIS/$sub --"
     $PY src/extraction_scripts/"$script" \
         --eeg-family clip4s --window-seconds 4 --out-dir "$EMB_VIS/$sub"
+    # upload this arch's clip4s npz(s) → HF, verify, then delete local
+    $PY - "$PLATONIC_LLM_REPO" "$PLATONIC_LOCAL_DIR" "$EMB_VIS/$sub" <<'PY'
+import os, sys, glob
+from huggingface_hub import HfApi
+repo, local_root, subdir = sys.argv[1], sys.argv[2], sys.argv[3]
+api = HfApi(token=os.environ.get("HF_TOKEN"))
+have = set(api.list_repo_files(repo, repo_type="dataset"))
+for f in sorted(glob.glob(os.path.join(subdir, "*__clip4s.npz"))):
+    dest = os.path.relpath(f, local_root)          # vision/<sub>/<file>
+    if dest in have:
+        print(f"  [hf] already on HF: {dest}"); os.remove(f); continue
+    print(f"  [hf] UPLOAD → {repo}:{dest} ({os.path.getsize(f)/1e6:.0f} MB)")
+    api.upload_file(path_or_fileobj=f, path_in_repo=dest, repo_id=repo,
+                    repo_type="dataset", commit_message=f"step3: {dest}")
+    if dest not in set(api.list_repo_files(repo, repo_type="dataset")):
+        raise SystemExit(f"  [hf] verify FAILED for {dest} — keeping local copy")
+    print(f"  [hf] verified on HF: {dest}")
+    os.remove(f); print(f"  [hf] deleted local {f} (safe: verified on HF)")
+PY
   done
 fi
 
