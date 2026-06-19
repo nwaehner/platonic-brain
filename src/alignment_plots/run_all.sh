@@ -202,14 +202,19 @@ if [ "${SKIP_PLOTS:-0}" != "1" ] && [ "$SMOKE" != "1" ] && [ "${REQUIRE_BPB:-1}"
 fi
 
 # ── [4] figures (with significance) ────────────────────────────────────────────
+# CPU-ONLY stage — run this LOCALLY, not on the paid GPU instance (it's no faster there).
+# PLOT_KPERM sets the permutation-null count (--k-perm): default 200; 50 is ~4x faster
+# with p-resolution ~0.02, fine for these alignment figures.
 if [ "${SKIP_PLOTS:-0}" != "1" ]; then
   banner "[4/4] figures"
-  $PY src/alignment_plots/intramodal.py             $PLOT_FLAG
-  $PY src/alignment_plots/video_vs_eeg_nonperf.py   $PLOT_FLAG
-  $PY src/alignment_plots/language_vs_eeg.py         $PLOT_FLAG
-  $PY src/alignment_plots/video_vs_eeg.py            $PLOT_FLAG
+  KPERM_FLAG=""; [ -n "${PLOT_KPERM:-}" ] && KPERM_FLAG="--k-perm $PLOT_KPERM"
+  echo "k-perm = ${PLOT_KPERM:-200 (default)}"
+  $PY src/alignment_plots/intramodal.py             $PLOT_FLAG $KPERM_FLAG
+  $PY src/alignment_plots/video_vs_eeg_nonperf.py   $PLOT_FLAG $KPERM_FLAG
+  $PY src/alignment_plots/language_vs_eeg.py         $PLOT_FLAG $KPERM_FLAG
+  $PY src/alignment_plots/video_vs_eeg.py            $PLOT_FLAG $KPERM_FLAG
   for sch in $VL_SCHEMES; do
-    $PY src/alignment_plots/video_vs_language.py --window-scheme "$sch" $PLOT_FLAG
+    $PY src/alignment_plots/video_vs_language.py --window-scheme "$sch" $PLOT_FLAG $KPERM_FLAG
   done
 fi
 
