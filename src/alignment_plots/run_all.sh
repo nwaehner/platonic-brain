@@ -148,14 +148,27 @@ if [ "${SKIP_VIDEO:-0}" != "1" ] && [ "$HAS_CLIP4S" = "1" ] && [ "$SMOKE" != "1"
   fi
   export PLATONIC_LLM_REPO
   echo "upload target = $PLATONIC_LLM_REPO   local(persistent) = $EMB_VIS"
-  #   script                          → vision/<arch> subdir the loader expects
+  #   script:vision-subdir:#expected-clip4s-files (for auto-resume skip)
   for spec in \
-    "extract_videomae.py:videomae" \
-    "extract_dinov2.py:dinov2" \
-    "extract_vjepa2.py:vjepa2" \
-    "extract_videomae_ft_kinetics.py:videomae_finetuned"; do
-    script="${spec%%:*}"; sub="${spec##*:}"
-    echo "-- video  $script → $EMB_VIS/$sub --"
+    "extract_videomae.py:videomae:2" \
+    "extract_dinov2.py:dinov2:4" \
+    "extract_vjepa2.py:vjepa2:3" \
+    "extract_videomae_ft_kinetics.py:videomae_finetuned:3"; do
+    script="${spec%%:*}"; rest="${spec#*:}"; sub="${rest%%:*}"; exp="${rest##*:}"
+    # auto-resume: skip this extractor entirely if all its clip4s files are already on HF
+    have_n=$($PY - "$PLATONIC_LLM_REPO" "$sub" <<'PY'
+import sys, os
+from huggingface_hub import HfApi
+repo, sub = sys.argv[1], sys.argv[2]
+fs = [f for f in HfApi(token=os.environ.get("HF_TOKEN")).list_repo_files(repo, repo_type="dataset")
+      if f.startswith(f"vision/{sub}/") and f.endswith("__clip4s.npz")]
+print(len(fs))
+PY
+)
+    if [ "${have_n:-0}" -ge "$exp" ]; then
+      echo "-- video  $sub: $have_n/$exp clip4s on HF — skipping (done) --"; continue
+    fi
+    echo "-- video  $script → $EMB_VIS/$sub  ($have_n/$exp on HF) --"
     $PY src/extraction_scripts/"$script" \
         --eeg-family clip4s --window-seconds 4 --out-dir "$EMB_VIS/$sub"
     # upload this arch's clip4s npz(s) → HF, verify, then delete local
