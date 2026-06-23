@@ -601,6 +601,7 @@ def partial_corr(x, y, z):
 # ── save helpers ─────────────────────────────────────────────────────────────────
 def save_npz(name, **arrays):
     path = OUT_DIR / name
+    path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(path, **arrays)
     print(f"  saved → outputs/{name}")
     return path
@@ -608,7 +609,494 @@ def save_npz(name, **arrays):
 
 def savefig(fig, name, dpi=150):
     path = OUT_DIR / name
+    path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     print(f"  saved → outputs/{name}")
     return path
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Interp redesign (Comp 1-5): 4 s-grid loaders, richer features, neighbourhood
+#  statistics, ANCOVA. See ~/.claude/plans/1-so-are-we-lucky-marshmallow.md.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# The 4 s ("clip4s") vision + LLM embeddings live in a SEPARATE dataset repo.
+REPO_4S = "triniborrell/platonic-embeddings"
+
+
+def _hf_load_from(path, repo):
+    """Download `path` from an arbitrary HF dataset `repo` and return embeddings."""
+    from huggingface_hub import hf_hub_download
+    local = hf_hub_download(repo, path, repo_type="dataset", token=C.HF_TOKEN_CACHE)
+    return np.load(local, allow_pickle=True)["embeddings"].astype(np.float32)
+
+
+def try_load_from(path, repo):
+    try:
+        return _hf_load_from(path, repo)
+    except Exception as e:
+        warnings.warn(f"could not load {path} from {repo}: {type(e).__name__}: {e}")
+        return None
+
+
+def load_eeg_emb(model, size):
+    """Subject-mean EEG embedding (L, W, D) from the nitrox639 eeg/ tree, or None."""
+    emb = try_load_emb(C.EEG[model]["fname"](size))           # (L, W, S, D) | nitrox639
+    return None if emb is None else emb.mean(axis=2)
+
+
+def load_vision_grid(arch, size, family):
+    """Vision embedding (L, W, D). family='clip4s' → 4 s repo; else EEG-grid (nitrox639)."""
+    path = C.VISION[arch]["path"](size, family)
+    emb = try_load_from(path, REPO_4S) if family == "clip4s" else try_load_emb(path)
+    if emb is None:
+        return None
+    return emb[None] if emb.ndim == 2 else emb
+
+
+def load_llm_grid(grid, stem):
+    """LLM caption embedding (L, W, D) from the 4 s repo. `grid` is 'clip4s' (4 s window
+    grid) or an EEG model name (its window grid). Both live under llms/<grid>/ in REPO_4S."""
+    emb = try_load_from(C.llm_path(grid, stem), REPO_4S)
+    if emb is None:
+        return None
+    return emb[None] if emb.ndim == 2 else emb
+
+
+# ── grid helpers (an EEG model name, or the 4 s 'clip4s' grid) ────────────────────
+def grid_win_sec(grid):
+    return CLIP_SEC if grid == "clip4s" else eeg_window_sec(grid)
+
+
+def grid_n_windows(grid):
+    return SEASON7_N_CLIPS if grid == "clip4s" else C.EEG_WINDOWS[grid]["n_windows"]
+
+
+def grid_caption_texts(grid, n=None):
+    """Per-window caption text on `grid`. clip4s = one caption per clip; EEG grids
+    concatenate the captions overlapping each window (build_window_texts)."""
+    caps = load_captions()
+    if grid == "clip4s":
+        texts = list(caps)
+    else:
+        texts, _ = build_window_texts(caps, grid_win_sec(grid), grid_n_windows(grid))
+    return texts[:n] if n else texts
+
+
+# ── intramodal pairing rule (shared by Comp 2 neighbour-layer & Comp 3 mKNN) ─────
+def intramodal_partner(sizes, i):
+    """Adjacent-size partner index for size i (ascending list): pair with the next
+    larger size; the largest pairs with the second-largest. Single-size → None."""
+    n = len(sizes)
+    if n < 2:
+        return None
+    return i + 1 if i < n - 1 else i - 1
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Richer per-window features (Comp 1)
+# ══════════════════════════════════════════════════════════════════════════════
+_SKIMAGE_NAMES = ["glcm_contrast", "glcm_homogeneity", "glcm_energy",
+                  "glcm_correlation", "lbp_entropy", "tex_entropy", "colorfulness"]
+
+
+def skimage_window_features(frames):
+    """Classical scikit-image texture/colour descriptors for one window's frames.
+    Returns (vec(7,), names). Empty windows → NaNs. Highly-cited, model-free:
+    GLCM/Haralick (contrast/homogeneity/energy/correlation), LBP entropy, image
+    entropy, Hasler–Süsstrunk colorfulness."""
+    import cv2
+    from skimage.feature import graycomatrix, graycoprops, local_binary_pattern
+    from skimage.measure import shannon_entropy
+    if not frames:
+        return np.full(len(_SKIMAGE_NAMES), np.nan, dtype=np.float32), _SKIMAGE_NAMES
+    mid = frames[len(frames) // 2]
+    gray = cv2.cvtColor(mid, cv2.COLOR_RGB2GRAY)
+    g32 = (gray.astype(np.float32) / 256 * 32).astype(np.uint8)       # 32 grey levels
+    glcm = graycomatrix(g32, distances=[1], angles=[0, np.pi / 4, np.pi / 2,
+                        3 * np.pi / 4], levels=32, symmetric=True, normed=True)
+    contrast    = float(graycoprops(glcm, "contrast").mean())
+    homogeneity = float(graycoprops(glcm, "homogeneity").mean())
+    energy      = float(graycoprops(glcm, "energy").mean())
+    correlation = float(graycoprops(glcm, "correlation").mean())
+    lbp = local_binary_pattern(gray, P=8, R=1, method="uniform")
+    hist, _ = np.histogram(lbp, bins=10, range=(0, 10), density=True)
+    lbp_entropy = float(-(hist[hist > 0] * np.log(hist[hist > 0])).sum())
+    tex_entropy = float(shannon_entropy(gray))
+    rgb = np.stack(frames).astype(np.float32)                         # (F,H,W,3)
+    R, G, B = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+    rg, yb = R - G, 0.5 * (R + G) - B
+    colorfulness = float(np.sqrt(rg.std() ** 2 + yb.std() ** 2)
+                         + 0.3 * np.sqrt(rg.mean() ** 2 + yb.mean() ** 2))
+    vec = np.array([contrast, homogeneity, energy, correlation, lbp_entropy,
+                    tex_entropy, colorfulness], dtype=np.float32)
+    return vec, _SKIMAGE_NAMES
+
+
+# ── Empath validated lexical categories (replaces the ad-hoc _LEXICONS) ───────────
+EMPATH_CATEGORIES = [
+    "violence", "fight", "weapon", "war", "death", "fear", "nervousness", "anger",
+    "aggression", "danger", "crime", "love", "affection", "positive_emotion",
+    "negative_emotion", "movement", "speed", "vehicle", "driving", "travel", "home",
+    "office", "work", "school", "family", "friends", "social", "communication",
+    "music", "night", "morning", "body", "eating", "sports", "money", "animal",
+    "nature", "urban", "water",
+]
+
+
+def empath_features(texts, categories=None):
+    """(matrix (W, C), names) of Empath category scores (normalised). Import-guarded:
+    if empath is unavailable returns an empty (W, 0) matrix + warning."""
+    cats = categories or EMPATH_CATEGORIES
+    try:
+        from empath import Empath
+    except Exception as e:
+        warnings.warn(f"empath unavailable ({type(e).__name__}); skipping semantic "
+                      f"lexical tier. `pip install empath` to enable.")
+        return np.zeros((len(texts), 0), dtype=np.float32), []
+    lex = Empath()
+    M = np.zeros((len(texts), len(cats)), dtype=np.float32)
+    for i, t in enumerate(texts):
+        d = lex.analyze(t or "", categories=cats, normalize=True) or {}
+        M[i] = [d.get(c, 0.0) for c in cats]
+    return M, list(cats)
+
+
+# ── CLIP (high-level visual tier + zero-shot labels + text embeddings) ────────────
+_CLIP = {}
+
+
+def clip_available():
+    try:
+        import torch  # noqa: F401
+        import transformers  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def get_clip(model_name="openai/clip-vit-base-patch32", device=None):
+    """Lazy-load a CLIP model + processor (cached). Returns the cache dict."""
+    if not _CLIP:
+        import torch
+        from transformers import CLIPModel, CLIPProcessor
+        dev = device or ("cuda" if torch.cuda.is_available()
+                         else "mps" if getattr(torch.backends, "mps", None)
+                         and torch.backends.mps.is_available() else "cpu")
+        print(f"  loading CLIP {model_name} on {dev} …")
+        model = CLIPModel.from_pretrained(model_name).to(dev).eval()
+        proc = CLIPProcessor.from_pretrained(model_name)
+        _CLIP.update(model=model, proc=proc, dev=dev, torch=torch, name=model_name)
+    return _CLIP
+
+
+def clip_image_embed(frames_per_window, max_frames=4, batch=32):
+    """CLIP joint-space image embedding per window, mean over up to `max_frames`
+    evenly-spaced frames. `frames_per_window`: list (len W) of lists of RGB arrays.
+    Returns (W, d) float32 (NaN row for empty windows)."""
+    cl = get_clip()
+    torch, model, proc, dev = cl["torch"], cl["model"], cl["proc"], cl["dev"]
+    d = model.config.projection_dim
+    out = np.full((len(frames_per_window), d), np.nan, dtype=np.float32)
+    flat_imgs, owner = [], []
+    for w, frames in enumerate(frames_per_window):
+        if not frames:
+            continue
+        idx = np.linspace(0, len(frames) - 1, min(max_frames, len(frames))).astype(int)
+        for j in idx:
+            flat_imgs.append(frames[j]); owner.append(w)
+    if not flat_imgs:
+        return out
+    embs = []
+    with torch.no_grad():
+        for s in range(0, len(flat_imgs), batch):
+            px = proc(images=flat_imgs[s:s + batch], return_tensors="pt").to(dev)
+            e = model.get_image_features(**px)
+            embs.append((e / e.norm(dim=-1, keepdim=True)).cpu().numpy())
+    embs = np.concatenate(embs, 0)
+    owner = np.asarray(owner)
+    for w in np.unique(owner):
+        out[w] = embs[owner == w].mean(0)
+    return out
+
+
+def clip_text_embed(texts, batch=64):
+    """CLIP joint-space text embedding (W, d), l2-normalised."""
+    cl = get_clip()
+    torch, model, proc, dev = cl["torch"], cl["model"], cl["proc"], cl["dev"]
+    embs = []
+    with torch.no_grad():
+        for s in range(0, len(texts), batch):
+            tok = proc(text=[t or "" for t in texts[s:s + batch]], return_tensors="pt",
+                       padding=True, truncation=True, max_length=77).to(dev)
+            e = model.get_text_features(**tok)
+            embs.append((e / e.norm(dim=-1, keepdim=True)).cpu().numpy())
+    return np.concatenate(embs, 0).astype(np.float32)
+
+
+def clip_zeroshot(image_emb, labels, prompt="a photo of {}"):
+    """Softmax label probabilities per window. image_emb (W, d) already l2-normalised
+    (NaN rows allowed). Returns (W, L) with NaN rows preserved."""
+    cl = get_clip()
+    scale = float(cl["model"].logit_scale.exp().detach().cpu())
+    txt = clip_text_embed([prompt.format(l) for l in labels])         # (L, d)
+    logits = image_emb @ txt.T * scale                                # (W, L)
+    logits -= np.nanmax(logits, axis=1, keepdims=True)
+    p = np.exp(logits)
+    p /= np.nansum(p, axis=1, keepdims=True)
+    return p.astype(np.float32)
+
+
+def text_embed(texts, prefer_clip=True):
+    """Sentence/caption embedding (W, d), l2-normalised. Uses the CLIP text encoder
+    when torch is available, else a TF-IDF fallback (sklearn) so the cosine studies
+    still run without a GPU stack. Returns (emb, backend_name)."""
+    if prefer_clip and clip_available():
+        try:
+            return clip_text_embed(texts), "clip"
+        except Exception as e:
+            warnings.warn(f"CLIP text embed failed ({type(e).__name__}); TF-IDF fallback.")
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.preprocessing import normalize
+    vec = TfidfVectorizer(max_features=4096, stop_words="english")
+    X = vec.fit_transform([t or "" for t in texts])
+    return normalize(np.asarray(X.todense(), dtype=np.float32)), "tfidf"
+
+
+# ── interpretable label bank (NOT hand-curated; standard taxonomy + caption-mined) ──
+# COCO-80 object classes (standard, exhaustive object taxonomy).
+_COCO80 = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
+    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
+    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
+    "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee", "skis",
+    "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard",
+    "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife",
+    "spoon", "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
+    "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant", "bed",
+    "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard",
+    "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
+    "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush",
+]
+# Compact scene + action banks (stand-ins for Places365 / Kinetics; data-mined terms
+# are appended at run time so the set is not cherry-picked).
+_SCENES = [
+    "indoor scene", "outdoor scene", "kitchen", "bedroom", "living room", "office",
+    "hallway", "street", "city", "forest", "field", "mountain", "beach", "sky",
+    "road", "restaurant", "store", "stadium", "night scene", "daytime scene",
+]
+_ACTIONS = [
+    "people talking", "a person running", "a person walking", "people fighting",
+    "a person driving", "people dancing", "a person falling", "a crowd of people",
+    "a close-up of a face", "fast motion", "a violent scene", "a calm scene",
+]
+
+
+def build_label_bank(captions=None, n_mined=30, smoke=False):
+    """Interpretable CLIP label bank: standard object/scene/action taxonomy + the most
+    frequent caption nouns (data-driven, so the set is exhaustive not cherry-picked).
+    Returns (labels, kinds) where kind ∈ {object,scene,action,mined}."""
+    if smoke:
+        labels = ["person", "car", "indoor scene", "outdoor scene", "a close-up of a face",
+                  "a crowd of people", "fast motion", "a violent scene"]
+        return labels, ["mixed"] * len(labels)
+    labels = list(_COCO80) + list(_SCENES) + list(_ACTIONS)
+    kinds = (["object"] * len(_COCO80) + ["scene"] * len(_SCENES)
+             + ["action"] * len(_ACTIONS))
+    if captions:
+        stop = set("the a an and or of to in on at is are was were be been with for "
+                   "this that these those it its his her their they he she you we as "
+                   "by from into over under then there here who which what while two "
+                   "one scene video features shows depicting appears seems various "
+                   "different first second".split())
+        from collections import Counter
+        import re
+        cnt = Counter()
+        for t in captions:
+            for w in re.findall(r"[a-z]{4,}", (t or "").lower()):
+                if w not in stop:
+                    cnt[w] += 1
+        existing = set(labels)
+        for w, _ in cnt.most_common():
+            if w in existing:
+                continue
+            labels.append(w); kinds.append("mined")
+            if sum(k == "mined" for k in kinds) >= n_mined:
+                break
+    return labels, kinds
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  Neighbourhood statistics (Comp 2 / 4) — no regression on y
+# ══════════════════════════════════════════════════════════════════════════════
+def cohens_d(a, b):
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    na, nb = len(a), len(b)
+    sp = np.sqrt(((na - 1) * a.var(ddof=1) + (nb - 1) * b.var(ddof=1))
+                 / max(na + nb - 2, 1))
+    return float((a.mean() - b.mean()) / (sp + 1e-12))
+
+
+def cles_auc(a, b):
+    """Common-language effect size P(a > b) (0.5 = no contrast). Rank-based."""
+    from scipy.stats import mannwhitneyu
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    if len(a) == 0 or len(b) == 0:
+        return float("nan")
+    try:
+        u = mannwhitneyu(a, b, alternative="greater").statistic
+    except ValueError:
+        return 0.5
+    return float(u / (len(a) * len(b)))
+
+
+def ks_stat(a, b):
+    from scipy.stats import ks_2samp
+    if len(a) == 0 or len(b) == 0:
+        return float("nan")
+    return float(ks_2samp(a, b).statistic)
+
+
+def benjamini_hochberg(pvals):
+    """BH-FDR adjusted q-values for a 1-D array of p-values."""
+    p = np.asarray(pvals, float)
+    ok = np.isfinite(p)
+    q = np.full_like(p, np.nan)
+    idx = np.where(ok)[0]
+    if idx.size == 0:
+        return q
+    ps = p[idx]
+    order = np.argsort(ps)
+    n = len(ps)
+    ranked = ps[order] * n / (np.arange(n) + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1].clip(max=1.0)
+    q[idx[order]] = ranked
+    return q
+
+
+def matched_perm_enrichment(fvals, neighbour_sets, R=1000, seed=0):
+    """Neighbour-vs-population enrichment of one feature with a matched-size null.
+    `fvals` (W_pop,) feature over the whole grid; `neighbour_sets` list of index
+    arrays (one per anchor). Null = R draws of random index sets with the SAME sizes.
+    Returns dict(mean_shift_sigma, var_ratio, cohens_d, auc, ks, p_mean, p_var,
+    n_neighbours, neigh_values, pop_values)."""
+    rng = np.random.default_rng(seed)
+    f = np.asarray(fvals, float)
+    finite = f[np.isfinite(f)]
+    pop_mean, pop_sd = finite.mean(), finite.std() + 1e-12
+    pop_var = finite.var() + 1e-12
+    sizes = [len(s) for s in neighbour_sets if len(s) > 0]
+    neigh = np.concatenate([f[s] for s in neighbour_sets if len(s) > 0]) \
+        if sizes else np.array([])
+    neigh = neigh[np.isfinite(neigh)]
+    if neigh.size < 2:
+        return dict(mean_shift_sigma=np.nan, var_ratio=np.nan, cohens_d=np.nan,
+                    auc=np.nan, ks=np.nan, p_mean=np.nan, p_var=np.nan,
+                    n_neighbours=int(neigh.size), neigh_values=neigh, pop_values=finite)
+    ntot = neigh.size
+    obs_mean, obs_var = neigh.mean(), neigh.var()
+    null_mean = np.empty(R); null_var = np.empty(R)
+    for r in range(R):
+        samp = finite[rng.integers(0, finite.size, ntot)]
+        null_mean[r] = samp.mean(); null_var[r] = samp.var()
+    p_mean = 2 * min((null_mean >= obs_mean).mean(), (null_mean <= obs_mean).mean())
+    p_var = 2 * min((null_var >= obs_var).mean(), (null_var <= obs_var).mean())
+    return dict(
+        mean_shift_sigma=float((obs_mean - pop_mean) / pop_sd),
+        var_ratio=float(obs_var / pop_var),
+        cohens_d=cohens_d(neigh, finite),
+        auc=cles_auc(neigh, finite), ks=ks_stat(neigh, finite),
+        p_mean=float(min(p_mean, 1.0)), p_var=float(min(p_var, 1.0)),
+        n_neighbours=int(ntot), neigh_values=neigh, pop_values=finite)
+
+
+def varratio_test(feat, shared_sets, R=200, min_n=2, seed=0):
+    """Per-window variance-ratio enrichment (Comp 2): for every window with ≥min_n shared
+    neighbours, ratio_w(f) = var(feat[neighbours]) / var(feat[all]). Tests, per feature,
+    whether the median ratio is SMALLER than under a matched-n permutation null (random
+    same-size sets). feat (W, F) must be finite. Returns dict or None if too few windows:
+      ratios (U, F) per-usable-window ratios · median_ratio (F,) · p (F,) one-sided <null ·
+      q (F,) BH-FDR · sizes (U,) · n_used."""
+    feat = np.asarray(feat, float)
+    W, F = feat.shape
+    gv = feat.var(0, ddof=1) + 1e-12
+    usable = [np.asarray(s, int) for s in shared_sets if len(s) >= min_n]
+    if len(usable) < 3:
+        return None
+    obs = np.array([feat[s].var(0, ddof=1) / gv for s in usable])     # (U, F)
+    med = np.nanmedian(obs, axis=0)                                   # (F,)
+    sizes = np.array([len(s) for s in usable])
+    rng = np.random.default_rng(seed)
+    groups = {int(s): np.where(sizes == s)[0] for s in np.unique(sizes)}
+    null_med = np.empty((R, F))
+    for r in range(R):
+        rat = np.empty((len(usable), F))
+        for s, rows in groups.items():
+            idx = rng.integers(0, W, size=(len(rows), s))             # (m, s)
+            rat[rows] = feat[idx].var(1, ddof=1) / gv                 # (m, F)
+        null_med[r] = np.median(rat, axis=0)
+    p = (np.sum(null_med <= med[None, :], axis=0) + 1) / (R + 1)
+    return dict(ratios=obs, median_ratio=med, p=p, q=benjamini_hochberg(p),
+                sizes=sizes, n_used=len(usable))
+
+
+def trace_cov_ratio_test(emb, shared_sets, R=200, min_n=2, seed=0):
+    """Multivariate analogue of varratio_test for the caption embedding (Comp 4):
+    per window, cap_ratio = trace(cov(emb[neighbours])) / trace(cov(emb[all])). For unit
+    vectors trace(cov)=1−‖centroid‖², so small ratio ⇔ tight (high mutual cosine) cluster.
+    Returns dict(ratios (U,), median, p one-sided <null, n_used) or None."""
+    emb = np.asarray(emb, float)
+    W = emb.shape[0]
+    gtv = emb.var(0, ddof=1).sum() + 1e-12
+    usable = [np.asarray(s, int) for s in shared_sets if len(s) >= min_n]
+    if len(usable) < 3:
+        return None
+    obs = np.array([emb[s].var(0, ddof=1).sum() / gtv for s in usable])
+    med = float(np.median(obs))
+    sizes = np.array([len(s) for s in usable])
+    rng = np.random.default_rng(seed)
+    groups = {int(s): np.where(sizes == s)[0] for s in np.unique(sizes)}
+    null_med = np.empty(R)
+    for r in range(R):
+        rat = np.empty(len(usable))
+        for s, rows in groups.items():
+            idx = rng.integers(0, W, size=(len(rows), s))
+            rat[rows] = emb[idx].var(1, ddof=1).sum(-1) / gtv
+        null_med[r] = np.median(rat)
+    p = (np.sum(null_med <= med) + 1) / (R + 1)
+    return dict(ratios=obs, median=med, p=float(p), n_used=len(usable))
+
+
+def ancova_family(df):
+    """ANCOVA R2 ~ MKNN + C(family). df columns: R2, MKNN, family. Returns the
+    family-adjusted MKNN slope, its p, partial η² (type-II SS for MKNN added last), the
+    unadjusted slope, and the added-variable residuals (R2|family, MKNN|family).
+
+    Uses statsmodels.api.OLS with explicit dummies (NOT patsy formulas) because the
+    module-global `C` (= alignment_plots/_common) shadows patsy's categorical `C()`."""
+    import statsmodels.api as sm
+    import pandas as pd
+    d = df.dropna(subset=["R2", "MKNN", "family"]).copy()
+    out = dict(n=len(d), slope_adj=np.nan, p_mknn=np.nan, partial_eta2=np.nan,
+               slope_unadj=np.nan, resid_r2=np.array([]), resid_mknn=np.array([]))
+    if len(d) < 4 or d["MKNN"].nunique() < 2:
+        return out
+    out["slope_unadj"] = float(np.polyfit(d["MKNN"], d["R2"], 1)[0])
+    if d["family"].nunique() < 2:                    # ANCOVA needs ≥2 families
+        out["slope_adj"] = out["slope_unadj"]
+        return out
+    y = d["R2"].to_numpy(float)
+    mk = d["MKNN"].to_numpy(float)
+    dum = pd.get_dummies(d["family"], drop_first=True).astype(float).to_numpy()
+    Xf = sm.add_constant(dum)                         # family-only design
+    Xfull = sm.add_constant(np.column_stack([mk, dum]))
+    full = sm.OLS(y, Xfull).fit()
+    out["slope_adj"] = float(full.params[1])         # col 0 = const, col 1 = MKNN
+    out["p_mknn"] = float(full.pvalues[1])
+    reduced = sm.OLS(y, Xf).fit()                    # drop MKNN
+    ss_mknn = float(reduced.ssr - full.ssr)          # type-II SS for MKNN
+    out["partial_eta2"] = float(ss_mknn / (ss_mknn + full.ssr + 1e-12))
+    out["resid_r2"] = (y - reduced.predict(Xf))
+    out["resid_mknn"] = (mk - sm.OLS(mk, Xf).fit().predict(Xf))
+    return out

@@ -16,3 +16,6 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+
+# Generated interp study artifacts (figures + .npz feature caches) — regenerable.
+src/interp/outputs/
