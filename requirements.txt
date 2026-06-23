@@ -24,6 +24,17 @@ wfdb
 # servers; functionally identical to opencv-python for all extract_*.py uses.
 opencv-python-headless
 
+# ── Interp post-hoc studies (src/interp/) ────────────────────────────────
+# scikit-image: highly-cited classical image features (GLCM/Haralick texture,
+#   LBP, Shannon entropy, colorfulness) for the low-level visual tier.
+# empath: Fast/Hayes/Bernstein CHI-2016 validated lexical categories — replaces
+#   the ad-hoc keyword lexicons for the semantic tier.
+# statsmodels: ANCOVA (R2 ~ MKNN + C(family)) for the linear-probing study.
+# CLIP zero-shot (high-level visual tier) reuses `transformers` above + torch.
+scikit-image
+empath
+statsmodels
+
 # ── Build tools ──────────────────────────────────────────────────────────
 # wheel must be present before mamba-ssm / causal-conv1d so their
 # pyproject.toml metadata step can run.

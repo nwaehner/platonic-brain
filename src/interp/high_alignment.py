@@ -1,25 +1,27 @@
 """
 high_alignment.py — Study (1a): WHICH fractions of the video carry the alignment.
 
-This formalises `notebooks/visualize_mknn_stimuli.ipynb`. For each EEG model it finds the
-best-aligned vision model and the best (EEG-layer, vision-layer) pair (max mKNN over all
-pairs), then computes the *per-window* mKNN — the shared-neighbour fraction at every video
-chunk — on the EEG model's matched window grid. It then characterises how the alignment is
-distributed in time:
+For each EEG model and EVERY vision model, this finds the best (EEG-layer, vision-layer)
+pair (max mKNN over all pairs) and computes the *per-window* mKNN — the shared-neighbour
+fraction at every video chunk, on the EEG model's matched window grid. It then characterises
+how the alignment is distributed in time.
 
-  • concentration  — sorted curve + Lorenz/Gini ("what % of windows carry the alignment")
-  • histogram      — distribution of per-window mKNN
-  • temporal trace — mKNN(t) with the top windows marked
-  • autocorrelation— how temporally bursty the high-alignment moments are
-  • cross-model agreement — Spearman ρ of per-window mKNN across EEG models sharing a grid
-  • top-window montage — the actual frames of the most-aligned chunks (needs cached video)
+Outputs are organised per EEG model, with the vision model in every filename:
+  outputs/<eeg_model>/
+    high_alignment_temporal_<arch-size>.png   per-window mKNN over the movie (top chunks marked)
+    high_alignment_lorenz_<arch-size>.png      concentration / Lorenz curve (+ Gini)
+    high_alignment_autocorr_<arch-size>.png    temporal autocorrelation of the per-window signal
+    high_alignment_montage_<arch-size>.png     frames of the most-aligned chunks (cached video)
+    high_alignment_<arch-size>.npz             arrays for this (eeg, vision) pair
+    high_alignment_concentration_summary.png   Gini per vision model (one figure per EEG model)
+    high_alignment_agreement.png               do vision models agree on the same chunks?
 
-The per-window arrays it saves are the dependent variable consumed by Study 1b / 4.
+The per-window arrays are the dependent variable consumed by Study 1b / 4.
 
 Usage:
-  python src/interp/high_alignment.py                       # all EEG models (heavy)
-  python src/interp/high_alignment.py --eeg-model reve --vision-arch vjepa2
-  python src/interp/high_alignment.py --eeg-model neurolm --no-video
+  python src/interp/high_alignment.py --eeg-model reve                 # all vision models
+  python src/interp/high_alignment.py --eeg-model neurolm --vision-arch vjepa2 dinov2
+  python src/interp/high_alignment.py --no-video                       # skip the frame montage
 """
 
 from __future__ import annotations
@@ -36,150 +38,90 @@ import _common as C
 TOP_N = 8
 
 
-def analyze_eeg(model, vision_archs, k, verbose=True):
-    """Find best vision model + layer pair for one EEG model; return per-window mKNN."""
-    fam = C.EEG[model]["family"]                   # vision must share EEG's window grid
-    size = C.EEG[model]["sizes"][-1]               # largest EEG size
+def autocorr(x):
+    """Biased autocorrelation of x at lags 0..len(x)-1, normalised so ACF(0)=1."""
+    z = x - x.mean()
+    a = np.correlate(z, z, mode="full")[len(z) - 1:]
+    return a / (a[0] + 1e-12)
+
+
+def load_eeg(model, k):
+    """Load an EEG model (largest size), subject-mean, and precompute its layerwise kNN.
+    Returns (nn_eeg (L,W,k), win_sec, W, fam, eeg_size) or None."""
+    size = C.EEG[model]["sizes"][-1]
     emb = IC.try_load_emb(C.EEG[model]["fname"](size))
     if emb is None:
         return None
-    eeg_avg = emb.mean(axis=2)                      # (L,W,S,D) -> (L,W,D)
-    nn_eeg = C.precompute_knn_layers(eeg_avg, k)
-    W = eeg_avg.shape[1]
-    win_sec = IC.eeg_window_sec(model)
+    eeg_avg = emb.mean(axis=2)                       # (L,W,S,D) -> (L,W,D)
+    return (C.precompute_knn_layers(eeg_avg, k), IC.eeg_window_sec(model),
+            eeg_avg.shape[1], C.EEG[model]["family"], size)
 
-    best = dict(score=-1.0)
-    for arch in vision_archs:
-        for vs in C.VISION[arch]["sizes"]:
-            vemb = IC.try_load_emb(C.VISION[arch]["path"](vs, fam))
-            if vemb is None:
-                continue
-            if vemb.ndim == 2:
-                vemb = vemb[None]
-            nn_vis = C.precompute_knn_layers(vemb, k)
-            la, lb, sc = IC.best_layer_pair(nn_eeg, nn_vis)
-            if verbose:
-                print(f"    {arch}-{vs}: max mKNN={sc:.3f} (le={la}, lv={lb})")
-            if sc > best["score"]:
-                best = dict(score=sc, arch=arch, size=vs, le=la, lv=lb,
-                            nn_vis=nn_vis)
-    if best["score"] < 0:
+
+def analyze_pair(model, nn_eeg, win_sec, W, arch, size, fam, k):
+    """Per-window mKNN for one (EEG model, vision model) pair at their best layer pair."""
+    vemb = IC.try_load_emb(C.VISION[arch]["path"](size, fam))
+    if vemb is None:
         return None
-
-    per_window = IC.mknn_per_window(nn_eeg[best["le"]], best["nn_vis"][best["lv"]])
+    if vemb.ndim == 2:
+        vemb = vemb[None]
+    nn_vis = C.precompute_knn_layers(vemb, k)
+    le, lv, score = IC.best_layer_pair(nn_eeg, nn_vis)
+    per_window = IC.mknn_per_window(nn_eeg[le], nn_vis[lv])
     top_idx = np.argsort(per_window)[::-1][:TOP_N]
-    starts = IC.canonical_starts(win_sec)
-    # temporal autocorrelation of the per-window signal
-    x = per_window - per_window.mean()
-    acf = np.correlate(x, x, mode="full")[len(x) - 1:]
-    acf = acf / (acf[0] + 1e-12)
-    return dict(model=model, eeg_size=size, vision_arch=best["arch"],
-                vision_size=best["size"], le=best["le"], lv=best["lv"],
-                raw_score=best["score"], per_window=per_window, top_idx=top_idx,
-                starts_s=starts[:len(per_window)], win_sec=win_sec, W=W,
-                gini=IC.gini(per_window), acf=acf,
-                vision_label=C.vision_label(best["arch"], best["size"]),
-                nn_eeg_best=nn_eeg[best["le"]],          # (W,k) — for Study 1b
-                nn_vis_best=best["nn_vis"][best["lv"]])  # (W,k)
+    starts = IC.canonical_starts(win_sec)[:len(per_window)]
+    return dict(model=model, arch=arch, size=size, vlabel=f"{arch}-{size}",
+                vision_label=C.vision_label(arch, size), le=le, lv=lv,
+                raw_score=score, per_window=per_window, top_idx=top_idx,
+                starts_s=starts, win_sec=win_sec, W=W, gini=IC.gini(per_window),
+                acf=autocorr(per_window),
+                nn_eeg_best=nn_eeg[le], nn_vis_best=nn_vis[lv])
 
 
-# ── plots ────────────────────────────────────────────────────────────────────────
-def _grid(n):
-    cols = min(3, n)
-    rows = int(np.ceil(n / cols))
-    return rows, cols
+# ── per-pair plots ───────────────────────────────────────────────────────────────
+def _title(r):
+    return f"{C.DISPLAY[r['model']]} × {r['vision_label']}  (max mKNN={r['raw_score']:.3f}, le={r['le']}, lv={r['lv']})"
 
 
-def plot_temporal_traces(results):
-    n = len(results)
-    rows, cols = _grid(n)
-    fig, axes = plt.subplots(rows, cols, figsize=(16, 4.2 * rows), squeeze=False)
-    for ax, (m, r) in zip(axes.ravel(), results.items()):
-        t = r["starts_s"] / 60.0
-        ax.plot(t, r["per_window"], color="#1a9850", lw=0.7)
-        ax.scatter(t[r["top_idx"]], r["per_window"][r["top_idx"]], color="crimson",
-                   s=30, zorder=5, label="top windows")
-        ax.set_title(f"{C.DISPLAY[m]} × {r['vision_label']}  (raw mKNN={r['raw_score']:.3f})")
-        ax.set_xlabel("time (min)"); ax.set_ylabel("per-window mKNN")
-        ax.grid(alpha=0.3); ax.legend(fontsize=8)
-    for ax in axes.ravel()[n:]:
-        ax.axis("off")
-    fig.suptitle("Per-window cross-modal alignment over the movie", y=1.0)
+def plot_temporal(r):
+    fig, ax = plt.subplots(figsize=(16, 6))
+    t = r["starts_s"] / 60.0
+    ax.plot(t, r["per_window"], color="#1a9850", lw=0.8)
+    ax.scatter(t[r["top_idx"]], r["per_window"][r["top_idx"]], color="crimson", s=40,
+               zorder=5, label=f"top-{TOP_N} chunks")
+    ax.set_xlabel("time (min)"); ax.set_ylabel("per-window mKNN")
+    ax.set_title("Per-window cross-modal alignment over the movie\n" + _title(r))
+    ax.grid(alpha=0.3); ax.legend()
     fig.tight_layout()
-    IC.savefig(fig, "high_alignment__temporal.png")
+    IC.savefig(fig, f"{r['model']}/high_alignment_temporal_{r['vlabel']}.png")
 
 
-def plot_lorenz(results):
+def plot_lorenz(r):
     fig, ax = plt.subplots(figsize=(11, 11))
-    for m, r in results.items():
-        frac, cum = IC.lorenz(r["per_window"])
-        ax.plot(frac, cum, lw=1.8,
-                label=f"{C.DISPLAY[m]}  (Gini={r['gini']:.2f})")
+    frac, cum = IC.lorenz(r["per_window"])
+    ax.plot(frac, cum, lw=2.2, color="#1a9850", label=f"Gini={r['gini']:.2f}")
     ax.plot([0, 1], [0, 1], color="grey", ls="--", lw=1, label="uniform")
     ax.set_xlabel("fraction of windows (most-aligned first)")
     ax.set_ylabel("cumulative share of total mKNN")
-    ax.set_title("Concentration of alignment across the video")
+    ax.set_title("Concentration of alignment across the video\n" + _title(r))
     ax.legend(); ax.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, "high_alignment__lorenz.png")
+    IC.savefig(fig, f"{r['model']}/high_alignment_lorenz_{r['vlabel']}.png")
 
 
-def plot_histograms(results):
-    n = len(results)
-    rows, cols = _grid(n)
-    fig, axes = plt.subplots(rows, cols, figsize=(16, 4.0 * rows), squeeze=False)
-    for ax, (m, r) in zip(axes.ravel(), results.items()):
-        ax.hist(r["per_window"], bins=40, color="#1a9850", alpha=0.8)
-        ax.axvline(r["per_window"].mean(), color="crimson", lw=1.5, label="mean")
-        ax.set_title(f"{C.DISPLAY[m]}"); ax.set_xlabel("per-window mKNN")
-        ax.set_ylabel("count"); ax.grid(alpha=0.3); ax.legend(fontsize=8)
-    for ax in axes.ravel()[n:]:
-        ax.axis("off")
-    fig.suptitle("Distribution of per-window alignment", y=1.0)
-    fig.tight_layout()
-    IC.savefig(fig, "high_alignment__hist.png")
-
-
-def plot_autocorr(results):
+def plot_autocorr(r):
     fig, ax = plt.subplots(figsize=(12, 8))
-    for m, r in results.items():
-        lag = np.arange(len(r["acf"])) * r["win_sec"]
-        keep = lag <= 120                           # first 2 minutes of lag
-        ax.plot(lag[keep], r["acf"][keep], lw=1.5, label=C.DISPLAY[m])
+    lag = np.arange(len(r["acf"])) * r["win_sec"]
+    keep = lag <= 120
+    ax.plot(lag[keep], r["acf"][keep], lw=1.8, color="#1a9850")
     ax.axhline(0, color="grey", lw=0.8)
-    ax.set_xlabel("temporal lag (s)"); ax.set_ylabel("autocorrelation of per-window mKNN")
-    ax.set_title("How temporally bursty are the high-alignment moments?")
-    ax.legend(); ax.grid(alpha=0.3)
+    ax.set_xlabel("temporal lag τ (seconds)")
+    ax.set_ylabel("autocorrelation of per-window mKNN")
+    ax.set_title("Temporal structure of the alignment signal\n"
+                 "slow decay ⇒ alignment comes in sustained bursts; "
+                 "fast decay ⇒ isolated spikes\n" + _title(r))
+    ax.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, "high_alignment__autocorr.png")
-
-
-def plot_agreement(results):
-    groups = {}
-    for m, r in results.items():
-        groups.setdefault(r["W"], []).append(m)
-    for W, models in groups.items():
-        if len(models) < 2:
-            continue
-        M = np.eye(len(models))
-        for i, a in enumerate(models):
-            for j, b in enumerate(models):
-                if i < j:
-                    rho, _ = spearmanr(results[a]["per_window"],
-                                       results[b]["per_window"])
-                    M[i, j] = M[j, i] = rho
-        labels = [C.DISPLAY[m] for m in models]
-        fig, ax = plt.subplots(figsize=(7, 6))
-        im = ax.imshow(M, vmin=-1, vmax=1, cmap="RdBu_r")
-        ax.set_xticks(range(len(models))); ax.set_yticks(range(len(models)))
-        ax.set_xticklabels(labels, rotation=45, ha="right"); ax.set_yticklabels(labels)
-        for i in range(len(models)):
-            for j in range(len(models)):
-                ax.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center", fontsize=8)
-        fig.colorbar(im, ax=ax, fraction=0.045).set_label("Spearman ρ")
-        ax.set_title(f"Do EEG models align on the SAME moments? (W={W})")
-        fig.tight_layout()
-        IC.savefig(fig, f"high_alignment__agreement_W{W}.png")
+    IC.savefig(fig, f"{r['model']}/high_alignment_autocorr_{r['vlabel']}.png")
 
 
 def plot_montage(r):
@@ -195,26 +137,72 @@ def plot_montage(r):
         ax.set_title(f"w={w}  {int(t // 60)}m{int(t % 60):02d}s\nmKNN={r['per_window'][w]:.2f}",
                      fontsize=9)
         ax.set_xticks([]); ax.set_yticks([])
-    fig.suptitle(f"{C.DISPLAY[r['model']]} × {r['vision_label']} — most-aligned chunks", y=1.0)
+    fig.suptitle("Most-aligned chunks\n" + _title(r), y=1.0)
     fig.tight_layout()
-    IC.savefig(fig, f"high_alignment__montage_{r['model']}.png")
+    IC.savefig(fig, f"{r['model']}/high_alignment_montage_{r['vlabel']}.png")
 
 
-def save(results):
-    for m, r in results.items():
-        IC.save_npz(f"high_alignment__{m}.npz",
-                    per_window=r["per_window"], top_idx=r["top_idx"],
-                    starts_s=r["starts_s"], acf=r["acf"],
-                    le_star=r["le"], lv_star=r["lv"], gini=r["gini"],
-                    raw_score=r["raw_score"], win_sec=r["win_sec"],
-                    eeg_size=r["eeg_size"], vision_arch=r["vision_arch"],
-                    vision_size=r["vision_size"], vision_label=r["vision_label"])
+# ── per-EEG-model summary plots (across vision models) ───────────────────────────
+def plot_concentration_summary(model, pairs):
+    fig, ax = plt.subplots(figsize=(12, max(5, 0.6 * len(pairs))))
+    pairs = sorted(pairs, key=lambda r: r["gini"])
+    y = np.arange(len(pairs))
+    colors = [C.VISION_ARCH_COLORS.get(r["arch"], "#1a9850") for r in pairs]
+    for yi, r, col in zip(y, pairs, colors):
+        ax.hlines(yi, 0, r["gini"], color=col, lw=2.2)
+        ax.plot(r["gini"], yi, "o", color=col, ms=10)
+        ax.annotate(f"max mKNN={r['raw_score']:.3f}", (r["gini"], yi), fontsize=8,
+                    xytext=(8, 0), textcoords="offset points", va="center")
+    ax.set_yticks(y); ax.set_yticklabels([r["vision_label"] for r in pairs], fontsize=9)
+    ax.set_xlabel("Gini of per-window mKNN  (higher ⇒ alignment more concentrated)")
+    ax.set_title(f"{C.DISPLAY[model]} — alignment concentration per vision model")
+    ax.grid(alpha=0.3, axis="x")
+    fig.tight_layout()
+    IC.savefig(fig, f"{model}/high_alignment_concentration_summary.png")
+
+
+def plot_agreement(model, pairs):
+    if len(pairs) < 2:
+        return
+    labels = [r["vision_label"] for r in pairs]
+    M = np.eye(len(pairs))
+    for i in range(len(pairs)):
+        for j in range(i + 1, len(pairs)):
+            rho, _ = spearmanr(pairs[i]["per_window"], pairs[j]["per_window"])
+            M[i, j] = M[j, i] = rho
+    fig, ax = plt.subplots(figsize=(max(8, len(pairs)), max(7, len(pairs) * 0.9)))
+    im = ax.imshow(M, vmin=-1, vmax=1, cmap="RdBu_r")
+    ax.set_xticks(range(len(pairs))); ax.set_yticks(range(len(pairs)))
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_yticklabels(labels, fontsize=8)
+    for i in range(len(pairs)):
+        for j in range(len(pairs)):
+            ax.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center", fontsize=7,
+                    color="white" if abs(M[i, j]) > 0.5 else "black")
+    fig.colorbar(im, ax=ax, fraction=0.045).set_label("Spearman ρ")
+    ax.set_title(f"{C.DISPLAY[model]} — do vision models align on the SAME chunks?")
+    fig.tight_layout()
+    IC.savefig(fig, f"{model}/high_alignment_agreement.png")
+
+
+def save_pair(r):
+    IC.save_npz(f"{r['model']}/high_alignment_{r['vlabel']}.npz",
+                per_window=r["per_window"], top_idx=r["top_idx"],
+                starts_s=r["starts_s"], acf=r["acf"], le_star=r["le"], lv_star=r["lv"],
+                gini=r["gini"], raw_score=r["raw_score"], win_sec=r["win_sec"],
+                eeg_model=r["model"], vision_arch=r["arch"], vision_size=r["size"],
+                vision_label=r["vision_label"])
+
+
+def vision_specs(archs):
+    for arch in archs:
+        for size in C.VISION[arch]["sizes"]:
+            yield arch, size
 
 
 def main():
     ap = argparse.ArgumentParser(description="Study 1a: high-alignment characterisation.")
-    ap.add_argument("--eeg-model", nargs="*", default=list(C.EEG),
-                    choices=list(C.EEG))
+    ap.add_argument("--eeg-model", nargs="*", default=list(C.EEG), choices=list(C.EEG))
     ap.add_argument("--vision-arch", nargs="*", default=list(C.VISION),
                     choices=list(C.VISION))
     ap.add_argument("--k", type=int, default=C.K_MKNN_DEFAULT)
@@ -223,29 +211,27 @@ def main():
     args = ap.parse_args()
 
     IC.set_token(args.hf_token)
-    results = {}
     for model in args.eeg_model:
-        print(f"[{model}] searching best vision alignment…")
-        r = analyze_eeg(model, args.vision_arch, args.k)
-        if r is None:
-            print(f"  (no data for {model})")
+        loaded = load_eeg(model, args.k)
+        if loaded is None:
+            print(f"[{model}] no EEG data — skipping")
             continue
-        results[model] = r
-        print(f"  best: {r['vision_label']}  raw mKNN={r['raw_score']:.3f}  "
-              f"Gini={r['gini']:.2f}")
-
-    if not results:
-        print("No results.")
-        return
-    plot_temporal_traces(results)
-    plot_lorenz(results)
-    plot_histograms(results)
-    plot_autocorr(results)
-    plot_agreement(results)
-    if args.video:
-        for r in results.values():
-            plot_montage(r)
-    save(results)
+        nn_eeg, win_sec, W, fam, _ = loaded
+        print(f"[{model}] grid family={fam}  W={W}  — scanning vision models")
+        pairs = []
+        for arch, size in vision_specs(args.vision_arch):
+            r = analyze_pair(model, nn_eeg, win_sec, W, arch, size, fam, args.k)
+            if r is None:
+                continue
+            print(f"    {r['vlabel']:18s} max mKNN={r['raw_score']:.3f}  Gini={r['gini']:.2f}")
+            plot_temporal(r); plot_lorenz(r); plot_autocorr(r)
+            if args.video:
+                plot_montage(r)
+            save_pair(r)
+            pairs.append(r)
+        if pairs:
+            plot_concentration_summary(model, pairs)
+            plot_agreement(model, pairs)
     print("Done.")
 
 
