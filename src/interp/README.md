@@ -174,13 +174,16 @@ cosine) as a table.
 
 ---
 
-## Independent studies (separate, unchanged)
+## Independent studies (separate)
+Each loads **EEG + vision from nitrox639** and **LLM caption embeddings from triniborrell**
+(nitrox639's `llms/` only has `neurolm`), and writes to its own `outputs/<study>/` subfolder.
+
 | Script | What it answers |
 |---|---|
-| **`high_alignment.py`** (1a) | *Which* video fractions carry the alignment — per-window mKNN, Lorenz/Gini concentration, temporal trace, autocorrelation, top-chunk montage. |
-| **`intrinsic_dimensionality.py`** (2) | Manifold **geometry** — participation ratio, TwoNN/MLE ID, effective rank vs depth/scale/performance. |
-| **`model_stitching.py`** (3) | **Functional** alignment — Procrustes/ridge maps between spaces vs a temporal shift-null. |
-| **`attribute_probing.py`** (4) | **What each model encodes** — block-CV linear probes of visual/semantic attributes across all models. |
+| **`high_alignment.py`** (1a) | *Which* video fractions carry the alignment — per-window mKNN, Lorenz/Gini, temporal trace, autocorrelation, top-chunk montage. Sweeps **EEG×vision _and_ EEG×language** (separate `_vision` / `_llm` summaries). |
+| **`intrinsic_dimensionality.py`** (2) | Manifold **geometry** — participation ratio, TwoNN/MLE ID, effective rank vs depth/scale/performance, per modality. |
+| **`model_stitching.py`** (3) | **Functional** alignment — Procrustes/ridge maps between spaces vs a temporal shift-null. `stitching_vs_mknn`: **x = ridge stitching R², y = max mKNN**. |
+| **`attribute_probing.py`** (4) | **What each model encodes** — block-CV linear probes; the **targets are the Component-1 tiers** (low / high-level visual / semantic), so it needs the Comp-1 feature cache for `--eeg-ref`. |
 | `semantic_or_visual_features_DEPRECATED.py` | **Retired** Study 1b (OLS variance-partition of the mKNN) — replaced by Components 1–5. |
 
 ## Shared modules
@@ -194,43 +197,171 @@ cosine) as a table.
 
 ---
 
-## Environment & running
+## Environment
 
 **CLIP needs torch.** This box is an **Intel/x86_64 mac**, where PyTorch's last wheel is 2.2.2
-(transformers 5.x rejects it), so use a pinned venv:
+(transformers 5.x rejects it), so the mediation pipeline uses a pinned venv:
 
 ```bash
 uv venv .venv-interp --python 3.11
 uv pip install --python .venv-interp/bin/python "torch==2.2.2" "transformers==4.49.0" \
     "numpy<2" "scikit-image==0.24.0" scikit-learn scipy statsmodels seaborn pandas \
     opencv-python-headless empath huggingface_hub matplotlib
-PY=.venv-interp/bin/python      # no torch → CLIP tier skipped, TF-IDF text fallback (still runs)
+PY=.venv-interp/bin/python
 ```
 
+- **`PY` (the venv) is required for Component 1** (it runs CLIP). Without torch, Comp 1 still
+  runs but skips the CLIP tier and uses a TF-IDF text fallback.
+- **Components 2–5 only read the cached features** (no model inference at run time), and the
+  **independent studies** never touch CLIP — those can run under the repo's base `python`. Using
+  `$PY` for everything is the simplest, and works.
+- A HF token is read from `tokens/hf_token.txt` (or `--hf-token` on any script).
+
+## Run order & prerequisites (READ THIS FIRST)
+
+```
+interp_features.py (Comp 1)  ──►  neighbour_enrichment.py   (Comp 2)
+   builds outputs/features/      ──►  feature_linear_probing.py (Comp 3)
+   <grid>__features.npz          ──►  caption_similarity.py     (Comp 4)
+                                 ──►  vis_lang_probing.py       (Comp 5)
+
+high_alignment / intrinsic_dimensionality / model_stitching / attribute_probing
+   = independent, no feature cache needed
+```
+
+**You must build the Comp 1 feature caches before running Comp 2–5.** A full (non-`--smoke`)
+run of Comp 2–5 reads `outputs/features/<grid>__features.npz`; if it is missing the script just
+prints `[skip] no feature cache for grid '…' — build Comp 1 first` and produces nothing. (The
+`__smoke` caches are separate files and are only used with `--smoke`.)
+
+### Step 0 — build the feature caches (Comp 1)
 ```bash
-# one-command smoke test of Components 1–5 (few windows, tiny label bank)
-$PY src/interp/run_interp_smoke.py
-
-# build the feature cache for a grid (an EEG model name, 'clip4s', or 'all')
-$PY src/interp/interp_features.py --grid reve
-$PY src/interp/interp_features.py --grid clip4s
-
-# the studies (drop --smoke for the full sweep; --k sets the mKNN neighbourhood, default 10)
-$PY src/interp/neighbour_enrichment.py            # Comp 2 — 6 regimes
-$PY src/interp/feature_linear_probing.py          # Comp 3 — EEG↔vision probing + ANCOVA
-$PY src/interp/vis_lang_probing.py                # Comp 5 — vision↔language (4 s)
-$PY src/interp/caption_similarity.py              # Comp 4 — caption variance ratio
-
-# independent studies (the repo's base python is fine — no torch needed)
-python src/interp/high_alignment.py --eeg-model reve
-python src/interp/intrinsic_dimensionality.py --modalities eeg --models reve
-python src/interp/model_stitching.py --eeg-ref neurolm
-python src/interp/attribute_probing.py --eeg-ref neurolm
+$PY src/interp/interp_features.py --grid all          # 5 EEG grids + clip4s, with CLIP
+# or a subset of grids:
+$PY src/interp/interp_features.py --grid reve clip4s
 ```
+Flags: `--grid` (EEG model name(s) / `clip4s` / `all`) · `--no-clip` (skip CLIP tier) ·
+`--force` (rebuild) · `--clip-model` · `--max-windows`. **Heavy & one-time:** computes the
+classical optical-flow/texture features over each *full* grid plus CLIP over every window (needs
+the cached CineBrain frames, ~2.6 GB, auto-downloaded once). Cached per grid → reruns are
+instant. Output: `outputs/features/<grid>__features.npz`.
 
-A HF token is read from `tokens/hf_token.txt` (or `--hf-token`).
+## The mediation pipeline (each needs the Comp 1 caches)
+
+### Component 2 — `neighbour_enrichment.py`  (variance ratio, 6 regimes)
+```bash
+$PY src/interp/neighbour_enrichment.py                       # all 6 regimes, full sweep
+$PY src/interp/neighbour_enrichment.py --regimes intersection_llm_vision --k 10
+```
+Flags: `--regimes` (subset of the 6) · `--k` (shared-neighbour kNN, default 10) · `--R`
+(permutation draws, default 200) · `--smoke`.
+Outputs: `outputs/enrichment/<grid>/varratio_<regime>_<label>.png` (3-subplot histogram) +
+`outputs/enrichment/enrich_<regime>.npz`. Prints "usable windows" per pair (drops windows with
+`<2` shared neighbours — watch this at k=10 on full grids).
+
+### Component 3 — `feature_linear_probing.py`  (EEG↔vision probing + ANCOVA)
+Needs the **EEG-grid** feature caches (all 5 for the full sweep) + vision embeddings on those grids.
+```bash
+$PY src/interp/feature_linear_probing.py                     # all EEG variants × all vision
+$PY src/interp/feature_linear_probing.py --eeg-model reve neurolm --vision-arch dinov2 vjepa2
+```
+Flags: `--eeg-model` (restrict EEG archs) · `--vision-arch` · `--k` · `--folds` (CV, default 5)
+· `--max-per-tier` (features probed per tier, default 12) · `--smoke`.
+Outputs (`outputs/probing/`): `probe_cross__a_fit.png`, `probe_cross__b_ancova.png`,
+`probe_intra__a_fit.png`, `probe_intra__b_ancova.png`, `feature_probing.npz`.
+
+### Component 4 — `caption_similarity.py`  (caption variance ratio)
+Needs the feature caches of the regimes' grids (uses `txt_emb`).
+```bash
+$PY src/interp/caption_similarity.py                         # all 6 regimes
+$PY src/interp/caption_similarity.py --regimes intersection_llm_vision intersection_eeg_vision
+```
+Flags: `--regimes` · `--k` · `--R` · `--smoke`.
+Outputs: `outputs/caption_sim/<grid>/capvar_<regime>_<label>.png` + `capvar_<regime>.npz`
+(median ratio, p, q, and the top sentence pairs).
+
+### Component 5 — `vis_lang_probing.py`  (vision↔language, 4 s)
+Needs the **`clip4s`** feature cache + clip4s vision/LLM embeddings.
+```bash
+$PY src/interp/vis_lang_probing.py                           # all vision × all LLMs (4 s)
+$PY src/interp/vis_lang_probing.py --vision-arch dinov2 vjepa2
+```
+Flags: `--vision-arch` · `--k` · `--folds` · `--max-per-tier` · `--smoke`.
+Outputs (`outputs/probing/`): `vislang_cross__a_fit.png`, `vislang_cross__b_ancova.png`,
+`vislang_intra__*`, `vis_lang_probing.npz`.
+
+## Independent studies
+All four load **EEG + vision from nitrox639, LLM from triniborrell**, and write to
+`outputs/<study>/`. Only `attribute_probing` needs a Comp-1 feature cache; the rest are
+self-contained (no torch).
+
+### `high_alignment.py` (1a) — where in the video the alignment lives
+```bash
+python src/interp/high_alignment.py --eeg-model reve --vision-arch videomae --llm bloomz-7b1
+python src/interp/high_alignment.py                                            # all EEG × vision × LLM
+python src/interp/high_alignment.py --no-llm                                   # EEG×vision only
+```
+Flags: `--eeg-model` · `--vision-arch` · **`--llm`** (stems for the EEG×language sweep, default
+all) · **`--no-llm`** · `--k` · `--no-video` (skip the frame montage).
+Outputs under `outputs/high_alignment/<eeg>/`: per-pair `…_{temporal,lorenz,autocorr,montage}_<partner>.png`
++ `.npz`, and **separate** `…_concentration_summary_{vision,llm}.png` / `…_agreement_{vision,llm}.png`.
+
+### `intrinsic_dimensionality.py` (2) — representation geometry
+```bash
+python src/interp/intrinsic_dimensionality.py --modalities eeg --models reve
+python src/interp/intrinsic_dimensionality.py --modalities all                # every model
+```
+Flags: `--modalities {eeg,vision,llm,all}` · `--models` (restrict) · **`--vision-family`**
+(nitrox639 EEG grid, default `femba_luna`) · **`--llm-grid`** (triniborrell, default `clip4s`) ·
+`--max-windows` · `--layer-stride` · `--no-local`.
+Outputs: `outputs/intrinsic_dimensionality/*` (`id_vs_depth.png`, `eigenspectrum.png`, …, `.npz`).
+
+### `model_stitching.py` (3) — functional alignment (run once per shared grid)
+```bash
+python src/interp/model_stitching.py --eeg-ref neurolm
+python src/interp/model_stitching.py --eeg-ref femba --all-sizes
+```
+Flags: `--eeg-ref` (places every model on this EEG grid — run once per family: `femba neurolm
+reve steegformer`) · `--all-sizes` · `--n-pc` · `--k` · `--best-layer` · `--flagship A B` · `--seed`.
+Outputs: `outputs/model_stitching/stitching_{matrix,proc_vs_lin,vs_mknn,layer_heatmap}.png` + `.npz`.
+`stitching_vs_mknn`: **x = ridge stitching R², y = max mKNN**.
+
+### `attribute_probing.py` (4) — what each model encodes (run once per shared grid)
+**Targets = the Component-1 tiers** (low / high-level visual / semantic), so build the feature
+cache for the reference grid first:
+```bash
+$PY src/interp/interp_features.py --grid neurolm          # prerequisite (CLIP → use the venv)
+python src/interp/attribute_probing.py --eeg-ref neurolm
+python src/interp/attribute_probing.py --eeg-ref neurolm --smoke --models neurolm vjepa2 bloom
+```
+Flags: `--eeg-ref` · `--models` (restrict) · `--n-layers` (default 8) · `--folds` · **`--smoke`**
+(use the `__smoke` feature cache). Outputs: `outputs/attribute_probing/probe_{heatmap,vs_depth,
+visual_vs_semantic,vs_scale}.png` (3 tiers; the scatter is visual=low+high vs semantic) + `.npz`.
+
+## One-command runners + smoke
+```bash
+PYTHON=$PY ./src/interp/run-components.sh   --smoke   # Components 1–5 sanity
+PYTHON=$PY ./src/interp/run-components.sh             # full pipeline (sequential)
+PYTHON=$PY ./src/interp/run-extra-studies.sh --smoke  # 4 independent studies, sanity
+PYTHON=$PY ./src/interp/run-extra-studies.sh          # full (loops --eeg-ref for studies 3–4)
+```
+Both scripts are venv-agnostic (`PYTHON=` override, else the active `python`), `set -euo
+pipefail`, and run sequentially.
+
+## Run on a server (SSH) — portable env
+The mac venv above is Intel-mac-specific; on a fresh box just install the platform-agnostic
+`requirements-interp.txt`:
+```bash
+git clone <repo> && cd platonic-brain
+python -m venv .venv && source .venv/bin/activate
+pip install -r src/interp/requirements-interp.txt     # GPU: install CUDA torch first (pytorch.org)
+echo "<hf_token>" > tokens/hf_token.txt               # or: export HF_TOKEN=<hf_token>
+./src/interp/run-components.sh --smoke && ./src/interp/run-components.sh
+./src/interp/run-extra-studies.sh --smoke && ./src/interp/run-extra-studies.sh
+```
 
 ## Outputs
-Figures + `.npz` are written under
-`src/interp/outputs/{features,enrichment,probing,caption_sim}/`. **These are generated/cache
-artifacts and are git-ignored** — regenerate them by re-running the scripts.
+Figures + `.npz` are written under `src/interp/outputs/{features,enrichment,probing,caption_sim,
+intrinsic_dimensionality,high_alignment,model_stitching,attribute_probing}/`.
+**All of `outputs/` is git-ignored** (generated figures + regenerable caches) — recreate by
+re-running the scripts.

@@ -57,24 +57,39 @@ def load_eeg(model, k):
             eeg_avg.shape[1], C.EEG[model]["family"], size)
 
 
-def analyze_pair(model, nn_eeg, win_sec, W, arch, size, fam, k):
-    """Per-window mKNN for one (EEG model, vision model) pair at their best layer pair."""
-    vemb = IC.try_load_emb(C.VISION[arch]["path"](size, fam))
-    if vemb is None:
+def analyze_partner(model, nn_eeg, win_sec, W, partner, k):
+    """Per-window mKNN for one (EEG model, partner) pair at their best layer pair. `partner`
+    is a vision spec dict(modality='vision', arch, size, fam) or an LLM spec
+    dict(modality='llm', stem). Vision embeddings come from nitrox639 (EEG grid); LLM caption
+    embeddings from triniborrell (llms/<eeg_model>/). Returns the per-pair record or None."""
+    if partner["modality"] == "vision":
+        pemb = IC.try_load_emb(C.VISION[partner["arch"]]["path"](partner["size"], partner["fam"]))
+        arch, size = partner["arch"], partner["size"]
+        vlabel = f"{arch}-{size}"
+        plabel = C.vision_label(arch, size)
+    else:                                              # llm — on this EEG model's grid
+        pemb = IC.load_llm_grid(model, partner["stem"])
+        arch, size = "llm", partner["stem"]
+        vlabel = partner["stem"]
+        plabel = C.LLM_LABEL.get(partner["stem"], partner["stem"])
+    if pemb is None:
         return None
-    if vemb.ndim == 2:
-        vemb = vemb[None]
-    nn_vis = C.precompute_knn_layers(vemb, k)
-    le, lv, score = IC.best_layer_pair(nn_eeg, nn_vis)
-    per_window = IC.mknn_per_window(nn_eeg[le], nn_vis[lv])
+    if pemb.ndim == 2:
+        pemb = pemb[None]
+    if pemb.shape[1] < W:
+        print(f"    skip {vlabel}: W={pemb.shape[1]} < {W}")
+        return None
+    nn_p = C.precompute_knn_layers(pemb[:, :W], k)
+    le, lv, score = IC.best_layer_pair(nn_eeg, nn_p)
+    per_window = IC.mknn_per_window(nn_eeg[le], nn_p[lv])
     top_idx = np.argsort(per_window)[::-1][:TOP_N]
     starts = IC.canonical_starts(win_sec)[:len(per_window)]
-    return dict(model=model, arch=arch, size=size, vlabel=f"{arch}-{size}",
-                vision_label=C.vision_label(arch, size), le=le, lv=lv,
+    return dict(model=model, modality=partner["modality"], arch=arch, size=size,
+                vlabel=vlabel, vision_label=plabel, le=le, lv=lv,
                 raw_score=score, per_window=per_window, top_idx=top_idx,
                 starts_s=starts, win_sec=win_sec, W=W, gini=IC.gini(per_window),
                 acf=autocorr(per_window),
-                nn_eeg_best=nn_eeg[le], nn_vis_best=nn_vis[lv])
+                nn_eeg_best=nn_eeg[le], nn_vis_best=nn_p[lv])
 
 
 # ── per-pair plots ───────────────────────────────────────────────────────────────
@@ -92,7 +107,7 @@ def plot_temporal(r):
     ax.set_title("Per-window cross-modal alignment over the movie\n" + _title(r))
     ax.grid(alpha=0.3); ax.legend()
     fig.tight_layout()
-    IC.savefig(fig, f"{r['model']}/high_alignment_temporal_{r['vlabel']}.png")
+    IC.savefig(fig, f"high_alignment/{r['model']}/high_alignment_temporal_{r['vlabel']}.png")
 
 
 def plot_lorenz(r):
@@ -105,7 +120,7 @@ def plot_lorenz(r):
     ax.set_title("Concentration of alignment across the video\n" + _title(r))
     ax.legend(); ax.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, f"{r['model']}/high_alignment_lorenz_{r['vlabel']}.png")
+    IC.savefig(fig, f"high_alignment/{r['model']}/high_alignment_lorenz_{r['vlabel']}.png")
 
 
 def plot_autocorr(r):
@@ -121,7 +136,7 @@ def plot_autocorr(r):
                  "fast decay ⇒ isolated spikes\n" + _title(r))
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, f"{r['model']}/high_alignment_autocorr_{r['vlabel']}.png")
+    IC.savefig(fig, f"high_alignment/{r['model']}/high_alignment_autocorr_{r['vlabel']}.png")
 
 
 def plot_montage(r):
@@ -139,15 +154,15 @@ def plot_montage(r):
         ax.set_xticks([]); ax.set_yticks([])
     fig.suptitle("Most-aligned chunks\n" + _title(r), y=1.0)
     fig.tight_layout()
-    IC.savefig(fig, f"{r['model']}/high_alignment_montage_{r['vlabel']}.png")
+    IC.savefig(fig, f"high_alignment/{r['model']}/high_alignment_montage_{r['vlabel']}.png")
 
 
 # ── per-EEG-model summary plots (across vision models) ───────────────────────────
-def plot_concentration_summary(model, pairs):
+def plot_concentration_summary(model, pairs, tag="vision"):
     fig, ax = plt.subplots(figsize=(12, max(5, 0.6 * len(pairs))))
     pairs = sorted(pairs, key=lambda r: r["gini"])
     y = np.arange(len(pairs))
-    colors = [C.VISION_ARCH_COLORS.get(r["arch"], "#1a9850") for r in pairs]
+    colors = [C.VISION_ARCH_COLORS.get(r["arch"], "#7570b3") for r in pairs]
     for yi, r, col in zip(y, pairs, colors):
         ax.hlines(yi, 0, r["gini"], color=col, lw=2.2)
         ax.plot(r["gini"], yi, "o", color=col, ms=10)
@@ -155,13 +170,13 @@ def plot_concentration_summary(model, pairs):
                     xytext=(8, 0), textcoords="offset points", va="center")
     ax.set_yticks(y); ax.set_yticklabels([r["vision_label"] for r in pairs], fontsize=9)
     ax.set_xlabel("Gini of per-window mKNN  (higher ⇒ alignment more concentrated)")
-    ax.set_title(f"{C.DISPLAY[model]} — alignment concentration per vision model")
+    ax.set_title(f"{C.DISPLAY[model]} — alignment concentration per {tag} model")
     ax.grid(alpha=0.3, axis="x")
     fig.tight_layout()
-    IC.savefig(fig, f"{model}/high_alignment_concentration_summary.png")
+    IC.savefig(fig, f"high_alignment/{model}/high_alignment_concentration_summary_{tag}.png")
 
 
-def plot_agreement(model, pairs):
+def plot_agreement(model, pairs, tag="vision"):
     if len(pairs) < 2:
         return
     labels = [r["vision_label"] for r in pairs]
@@ -180,13 +195,13 @@ def plot_agreement(model, pairs):
             ax.text(j, i, f"{M[i, j]:.2f}", ha="center", va="center", fontsize=7,
                     color="white" if abs(M[i, j]) > 0.5 else "black")
     fig.colorbar(im, ax=ax, fraction=0.045).set_label("Spearman ρ")
-    ax.set_title(f"{C.DISPLAY[model]} — do vision models align on the SAME chunks?")
+    ax.set_title(f"{C.DISPLAY[model]} — do {tag} models align on the SAME chunks?")
     fig.tight_layout()
-    IC.savefig(fig, f"{model}/high_alignment_agreement.png")
+    IC.savefig(fig, f"high_alignment/{model}/high_alignment_agreement_{tag}.png")
 
 
 def save_pair(r):
-    IC.save_npz(f"{r['model']}/high_alignment_{r['vlabel']}.npz",
+    IC.save_npz(f"high_alignment/{r['model']}/high_alignment_{r['vlabel']}.npz",
                 per_window=r["per_window"], top_idx=r["top_idx"],
                 starts_s=r["starts_s"], acf=r["acf"], le_star=r["le"], lv_star=r["lv"],
                 gini=r["gini"], raw_score=r["raw_score"], win_sec=r["win_sec"],
@@ -200,11 +215,37 @@ def vision_specs(archs):
             yield arch, size
 
 
+ALL_LLM_STEMS = [st for fam in C.LLM for st in C.LLM[fam]]
+
+
+def _sweep(model, nn_eeg, win_sec, W, partners, k, video, tag):
+    """Run the per-pair analysis + plots for a list of partner specs; return the records."""
+    pairs = []
+    for partner in partners:
+        r = analyze_partner(model, nn_eeg, win_sec, W, partner, k)
+        if r is None:
+            continue
+        print(f"    {r['vlabel']:18s} max mKNN={r['raw_score']:.3f}  Gini={r['gini']:.2f}")
+        plot_temporal(r); plot_lorenz(r); plot_autocorr(r)
+        if video:
+            plot_montage(r)
+        save_pair(r)
+        pairs.append(r)
+    if pairs:
+        plot_concentration_summary(model, pairs, tag)
+        plot_agreement(model, pairs, tag)
+    return pairs
+
+
 def main():
     ap = argparse.ArgumentParser(description="Study 1a: high-alignment characterisation.")
     ap.add_argument("--eeg-model", nargs="*", default=list(C.EEG), choices=list(C.EEG))
     ap.add_argument("--vision-arch", nargs="*", default=list(C.VISION),
                     choices=list(C.VISION))
+    ap.add_argument("--llm", nargs="*", default=ALL_LLM_STEMS,
+                    help="LLM stems for the EEG×language sweep (default: all).")
+    ap.add_argument("--no-llm", dest="with_llm", action="store_false",
+                    help="skip the EEG×language sweep.")
     ap.add_argument("--k", type=int, default=C.K_MKNN_DEFAULT)
     ap.add_argument("--no-video", dest="video", action="store_false")
     ap.add_argument("--hf-token", default=None)
@@ -218,20 +259,13 @@ def main():
             continue
         nn_eeg, win_sec, W, fam, _ = loaded
         print(f"[{model}] grid family={fam}  W={W}  — scanning vision models")
-        pairs = []
-        for arch, size in vision_specs(args.vision_arch):
-            r = analyze_pair(model, nn_eeg, win_sec, W, arch, size, fam, args.k)
-            if r is None:
-                continue
-            print(f"    {r['vlabel']:18s} max mKNN={r['raw_score']:.3f}  Gini={r['gini']:.2f}")
-            plot_temporal(r); plot_lorenz(r); plot_autocorr(r)
-            if args.video:
-                plot_montage(r)
-            save_pair(r)
-            pairs.append(r)
-        if pairs:
-            plot_concentration_summary(model, pairs)
-            plot_agreement(model, pairs)
+        vis_partners = [dict(modality="vision", arch=arch, size=size, fam=fam)
+                        for arch, size in vision_specs(args.vision_arch)]
+        _sweep(model, nn_eeg, win_sec, W, vis_partners, args.k, args.video, "vision")
+        if args.with_llm:
+            print(f"[{model}] — scanning language models (EEG×language)")
+            llm_partners = [dict(modality="llm", stem=st) for st in args.llm]
+            _sweep(model, nn_eeg, win_sec, W, llm_partners, args.k, args.video, "llm")
     print("Done.")
 
 

@@ -88,7 +88,6 @@ def last(arr):
 # ── collection over the registries ───────────────────────────────────────────────
 def collect(args):
     records = {}                                   # key -> record dict (+ meta)
-    fam = args.family
 
     def want(mod):
         return "all" in args.modalities or mod in args.modalities
@@ -111,8 +110,8 @@ def collect(args):
         for arch, size in IC.iter_vision():
             if args.models and arch not in args.models:
                 continue
-            print(f"[vision] {arch}-{size} ({fam})")
-            emb, used = IC.load_vision_emb(arch, size, fam)
+            print(f"[vision] {arch}-{size} ({args.vision_family})")    # nitrox639 EEG-grid
+            emb, used = IC.load_vision_emb(arch, size, args.vision_family)
             if emb is None:
                 continue
             if emb.ndim == 2:
@@ -128,18 +127,16 @@ def collect(args):
         for famly, stem in IC.iter_llm():
             if args.models and famly not in args.models:
                 continue
-            print(f"[llm] {stem} ({fam})")
-            emb, used = IC.load_llm_emb(stem, fam)
+            print(f"[llm] {stem} ({args.llm_grid})")                    # triniborrell
+            emb = IC.load_llm_grid(args.llm_grid, stem)
             if emb is None:
                 continue
-            if emb.ndim == 2:
-                emb = emb[None]
             rec = analyze(emb, args.local, args.max_windows, args.layer_stride)
             perf = C.LLM_PERF.get(stem)
             rec.update(modality="llm", label=C.LLM_LABEL.get(stem, stem),
                        params=C.LLM_PARAMS.get(stem, np.nan),
                        perf=perf if perf is not None else np.nan, family=famly,
-                       used_family=used)
+                       used_family=args.llm_grid)
             records[f"llm|{famly}|{stem}"] = rec
 
     return records
@@ -171,7 +168,7 @@ def plot_id_vs_depth(records):
                 ax.legend(fontsize=6, ncol=1, loc="best")
     fig.suptitle("Intrinsic dimensionality vs depth", y=1.0)
     fig.tight_layout()
-    IC.savefig(fig, "id_vs_depth.png")
+    IC.savefig(fig, "intrinsic_dimensionality/id_vs_depth.png")
 
 
 def plot_id_vs_scale(records):
@@ -194,7 +191,7 @@ def plot_id_vs_scale(records):
     axes[0][1].legend(handles=handles, title="modality")
     fig.suptitle("Intrinsic dimensionality vs model scale", y=1.0)
     fig.tight_layout()
-    IC.savefig(fig, "id_vs_scale.png")
+    IC.savefig(fig, "intrinsic_dimensionality/id_vs_scale.png")
 
 
 def plot_linear_vs_nonlinear(records):
@@ -217,7 +214,7 @@ def plot_linear_vs_nonlinear(records):
               label="x = y")])
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, "linear_vs_nonlinear.png")
+    IC.savefig(fig, "intrinsic_dimensionality/linear_vs_nonlinear.png")
 
 
 def plot_id_vs_performance(records):
@@ -250,7 +247,7 @@ def plot_id_vs_performance(records):
     axV.set_title("Vision ID vs performance")
     axV.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, "id_vs_performance.png")
+    IC.savefig(fig, "intrinsic_dimensionality/id_vs_performance.png")
 
 
 def plot_cross_modality(records):
@@ -280,7 +277,7 @@ def plot_cross_modality(records):
         ax.legend(title="modality")
     fig.suptitle("Cross-modality ID vs depth (mean ± sd across models)", y=1.0)
     fig.tight_layout()
-    IC.savefig(fig, "id_cross_modality.png")
+    IC.savefig(fig, "intrinsic_dimensionality/id_cross_modality.png")
 
 
 def plot_eigenspectrum(records):
@@ -297,7 +294,7 @@ def plot_eigenspectrum(records):
     ax.legend(handles=handles, title="modality")
     ax.grid(alpha=0.3, which="both")
     fig.tight_layout()
-    IC.savefig(fig, "eigenspectrum.png")
+    IC.savefig(fig, "intrinsic_dimensionality/eigenspectrum.png")
 
 
 def plot_localid_agreement(records):
@@ -328,7 +325,7 @@ def plot_localid_agreement(records):
         fig.colorbar(im, ax=ax, fraction=0.045).set_label("Spearman ρ")
         ax.set_title(f"Cross-FM agreement on per-window local ID (W={W})")
         fig.tight_layout()
-        IC.savefig(fig, f"localid_agreement_W{W}.png")
+        IC.savefig(fig, f"intrinsic_dimensionality/localid_agreement_W{W}.png")
 
 
 def plot_id_vs_alignment(records):
@@ -368,7 +365,7 @@ def plot_id_vs_alignment(records):
     ax.set_title("Does intrinsic dimensionality track cross-modal alignment?")
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, "id_vs_alignment.png")
+    IC.savefig(fig, "intrinsic_dimensionality/id_vs_alignment.png")
 
 
 # ── persistence ──────────────────────────────────────────────────────────────────
@@ -388,7 +385,7 @@ def save(records):
     flat["pr_last"] = np.array([last(records[k]["pr"]) for k in keys])
     flat["twonn_last"] = np.array([last(records[k]["twonn"]) for k in keys])
     flat["mle_last"] = np.array([last(records[k]["mle"]) for k in keys])
-    IC.save_npz("intrinsic_dimensionality.npz", **flat)
+    IC.save_npz("intrinsic_dimensionality/intrinsic_dimensionality.npz", **flat)
 
 
 def main():
@@ -397,8 +394,10 @@ def main():
                     choices=["all", "eeg", "vision", "llm"])
     ap.add_argument("--models", nargs="*", default=None,
                     help="restrict to these family names (e.g. reve dinov2 bloom).")
-    ap.add_argument("--family", default=IC.DEFAULT_FAMILY,
-                    help="vision/LLM window family (default clip4s, falls back).")
+    ap.add_argument("--vision-family", default="femba_luna",
+                    help="vision window family on nitrox639 (EEG grid; default femba_luna).")
+    ap.add_argument("--llm-grid", default="clip4s",
+                    help="LLM caption grid on triniborrell (default clip4s; or an EEG grid).")
     ap.add_argument("--max-windows", type=int, default=None,
                     help="subsample windows for the global ID estimators.")
     ap.add_argument("--layer-stride", type=int, default=1)
