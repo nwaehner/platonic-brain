@@ -250,9 +250,14 @@ def run(model_name, texts, n_caps, win_sec, eeg_model, out_dir, device,
             sub_texts, tokenizer, model, device, batch_size, max_length)
     except torch.cuda.OutOfMemoryError:
         oom_bs = batch_size      # retry OUTSIDE the except: while still inside it, the
-    if oom_bs is not None:       # caught exception's traceback pins the failed attempt's
-        gc.collect()             # tensors (BLOOM logits over a 250k vocab can be >10 GB),
-        torch.cuda.empty_cache() # so empty_cache can't reclaim them and the retry OOMs too.
+    except RuntimeError as e:
+        if "out of memory" not in str(e).lower():
+            raise
+        oom_bs = batch_size      # caught exception's traceback pins the failed attempt's
+        del e
+    if oom_bs is not None:       # tensors (BLOOM logits over a 250k vocab can be >10 GB),
+        gc.collect()             # so empty_cache can't reclaim them and the retry OOMs too.
+        torch.cuda.empty_cache()
         print(f"  OOM at batch_size={oom_bs} — freed memory, retrying at batch_size=2.")
         embeddings = neuro.collect_text_activations(
             sub_texts, tokenizer, model, device, 2, max_length)
