@@ -105,6 +105,7 @@ if [ "${SKIP_EXTRACT:-0}" != "1" ]; then
 
   # pre-flight inventory: exactly what is already on HF vs still missing
   $PY - "$PLATONIC_HF_UPLOAD" "$LLM_SCHEMES" "$LLM_FAMILIES" <<'PY' || true
+import os
 import sys
 from huggingface_hub import HfApi
 repo, schemes, fams = sys.argv[1], sys.argv[2].split(), sys.argv[3].split()
@@ -112,7 +113,8 @@ LLM = {"bloom":["bloomz-560m","bloomz-1b1","bloomz-1b7","bloomz-3b","bloomz-7b1"
        "openllama":["open_llama_3b","open_llama_7b","open_llama_13b"],
        "llama":["llama-13b"]}
 stems = [s for f in fams for s in LLM.get(f, [])]
-have = set(f for f in HfApi().list_repo_files(repo, repo_type="dataset") if f.startswith("llms/"))
+api = HfApi(token=os.environ.get("HF_TOKEN"))
+have = set(f for f in api.list_repo_files(repo, repo_type="dataset") if f.startswith("llms/"))
 tot = miss = 0
 print(f"[2] INVENTORY on {repo}  (FEMBA=LUNA, luna copied from femba):")
 for sch in schemes:
