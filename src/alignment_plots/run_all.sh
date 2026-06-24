@@ -6,8 +6,9 @@
 #   [2] extract LLM caption embeddings for every window scheme × LLM family
 #       (EEG models + clip4s — the 4 s scheme used by video_vs_language)
 #   [3] extract the 4 s clip4s VIDEO embeddings (only when clip4s ∈ VL_SCHEMES)
-#   [4] render every figure (intramodal, video_vs_eeg_nonperf, language_vs_eeg,
-#       video_vs_eeg, video_vs_language) WITH significance → src/alignment_plots/outputs/
+#   [4] render every figure (intramodal [EEG+vision+LLM size-scaling], video_vs_eeg_nonperf,
+#       language_vs_eeg_nonperf, language_vs_eeg, video_vs_eeg, video_vs_language) WITH
+#       significance → src/alignment_plots/outputs/
 #
 # EEG + EEG-windowed vision embeddings come from HuggingFace; only the LLM and the
 # clip4s video embeddings are new and are read locally via PLATONIC_LOCAL_DIR
@@ -213,6 +214,7 @@ if [ "${SKIP_PLOTS:-0}" != "1" ]; then
   echo "k-perm = ${PLOT_KPERM:-200 (default)}"
   $PY src/alignment_plots/intramodal.py             $PLOT_FLAG $KPERM_FLAG
   $PY src/alignment_plots/video_vs_eeg_nonperf.py   $PLOT_FLAG $KPERM_FLAG
+  $PY src/alignment_plots/language_vs_eeg_nonperf.py $PLOT_FLAG $KPERM_FLAG
   $PY src/alignment_plots/language_vs_eeg.py         $PLOT_FLAG $KPERM_FLAG
   $PY src/alignment_plots/video_vs_eeg.py            $PLOT_FLAG $KPERM_FLAG
   for sch in $VL_SCHEMES; do
