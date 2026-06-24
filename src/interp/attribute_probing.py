@@ -72,19 +72,24 @@ def _clean_labels(M):
 
 
 # ── label construction on the reference grid ─────────────────────────────────────
-def build_labels(eeg_ref):
-    win_sec = IC.eeg_window_sec(eeg_ref)
-    vis = IC.compute_visual_features(eeg_ref)
-    Vy = _clean_labels(vis["scalars"])
-    vis_names = list(vis["scalar_names"])
-    caps = IC.load_captions()
-    texts, _ = IC.build_window_texts(caps, win_sec,
-                                     C.EEG_WINDOWS[eeg_ref]["n_windows"])
-    A, attr_names = IC.caption_attributes(texts)
-    Sy = _clean_labels(A)
-    names = [f"vis:{n}" for n in vis_names] + [f"sem:{n}" for n in attr_names]
-    Y = np.hstack([Vy, Sy])
-    kinds = ["visual"] * Vy.shape[1] + ["semantic"] * Sy.shape[1]
+# Probe TARGETS = the Component-1 feature stack (same tiers as neighbour_enrichment):
+# low-level visual / high-level visual (CLIP) / semantic. Requires the cached feature set
+# for the reference grid (build with `interp_features.py --grid <eeg_ref>`).
+TIERS = ["low", "highvis", "sem"]
+TIER_LABEL = {"low": "low-level visual", "highvis": "high-level visual", "sem": "semantic"}
+
+
+def build_labels(eeg_ref, smoke=False):
+    import interp_features as F
+    feats = F.load_features(eeg_ref, smoke)
+    if feats is None:
+        raise SystemExit(
+            f"No Component-1 feature cache for grid '{eeg_ref}'. Build it first:\n"
+            f"  python src/interp/interp_features.py --grid {eeg_ref}"
+            f"{' --smoke' if smoke else ''}")
+    Y = _clean_labels(feats["feat"])                   # z-scored (W, F)
+    names = [str(n) for n in feats["feat_names"]]
+    kinds = [str(t) for t in feats["feat_tier"]]       # low / highvis / sem
     return Y, names, kinds
 
 
@@ -118,7 +123,7 @@ def load_spec(sp):
     if sp["kind"] == "vision":
         e = IC.try_load_emb(C.VISION[sp["name"]]["path"](sp["size"], sp["vis_family"]))
     else:
-        e = IC.try_load_emb(C.llm_path(sp["llm_dir"], sp["size"]))
+        e = IC.load_llm_grid(sp["llm_dir"], sp["size"])    # triniborrell (nitrox639 lacks most)
     if e is None:
         return None
     return e[None] if e.ndim == 2 else e
@@ -146,20 +151,21 @@ def probe_model(emb, Y, n_layers_probe, n_folds, W):
 
 def run(args):
     IC.set_token(args.hf_token)
-    Y, names, kinds = build_labels(args.eeg_ref)
+    Y, names, kinds = build_labels(args.eeg_ref, args.smoke)
     W = Y.shape[0]
     kinds = np.array(kinds)
-    print(f"labels: {W} windows × {len(names)} attributes ({(kinds=='visual').sum()} "
-          f"visual + {(kinds=='semantic').sum()} semantic)")
+    print(f"labels: {W} windows × {len(names)} attributes ("
+          + ", ".join(f"{(kinds == t).sum()} {t}" for t in TIERS) + ")")
 
     specs = build_specs(args.eeg_ref, args.models)
     results = {}
     for sp in specs:
         emb = load_spec(sp)
-        if emb is None or emb.shape[1] != W:
+        if emb is None or emb.shape[1] < W:
             if emb is not None:
-                print(f"  skip {sp['label']}: W={emb.shape[1]} ≠ {W}")
+                print(f"  skip {sp['label']}: W={emb.shape[1]} < {W}")
             continue
+        emb = emb[:, :W]                                # match the (possibly smoke) label grid
         print(f"  probing {sp['label']}: {emb.shape}")
         scores, rel, base = probe_model(emb, Y, args.n_layers, args.folds, W)
         results[sp["label"]] = dict(scores=scores, rel=rel, baseline=base,
@@ -191,13 +197,14 @@ def plot_heatmap(results, names, kinds):
     fig.colorbar(im, ax=ax, fraction=0.03).set_label("best-layer R²")
     ax.set_title("Linear decodability of each attribute from each model")
     fig.tight_layout()
-    IC.savefig(fig, "probe_heatmap.png")
+    IC.savefig(fig, "attribute_probing/probe_heatmap.png")
 
 
 def plot_vs_depth(results, kinds):
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7), squeeze=False)
+    tiers = [t for t in TIERS if (kinds == t).any()]
+    fig, axes = plt.subplots(1, len(tiers), figsize=(7 * len(tiers), 6.5), squeeze=False)
     grid = np.linspace(0, 1, 11)
-    for ax, kind in zip(axes[0], ["visual", "semantic"]):
+    for ax, kind in zip(axes[0], tiers):
         cols = np.where(kinds == kind)[0]
         for mod in ["eeg", "vision", "llm"]:
             curves = []
@@ -210,18 +217,18 @@ def plot_vs_depth(results, kinds):
                     continue
                 curves.append(np.interp(grid, r["rel"][fin], per_layer[fin]))
             if curves:
-                m = np.mean(curves, 0)
-                ax.plot(grid, m, color=MOD_COLOR[mod], lw=2, label=mod)
-        ax.set_xlabel("relative depth"); ax.set_ylabel(f"mean {kind} R²")
-        ax.set_title(f"{kind.capitalize()} decodability vs depth")
+                ax.plot(grid, np.mean(curves, 0), color=MOD_COLOR[mod], lw=2, label=mod)
+        ax.set_xlabel("relative depth"); ax.set_ylabel(f"mean {TIER_LABEL[kind]} R²")
+        ax.set_title(f"{TIER_LABEL[kind]} decodability vs depth")
         ax.legend(title="modality"); ax.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, "probe_vs_depth.png")
+    IC.savefig(fig, "attribute_probing/probe_vs_depth.png")
 
 
 def plot_visual_vs_semantic(results, kinds):
-    vis_c = np.where(kinds == "visual")[0]
-    sem_c = np.where(kinds == "semantic")[0]
+    # "visual" = low-level ∪ high-level (CLIP); "semantic" = the sem tier.
+    vis_c = np.where((kinds == "low") | (kinds == "highvis"))[0]
+    sem_c = np.where(kinds == "sem")[0]
     fig, ax = plt.subplots(figsize=(11, 11))
     for k, r in results.items():
         best = _best_layer(r["scores"])
@@ -230,19 +237,20 @@ def plot_visual_vs_semantic(results, kinds):
         ax.annotate(k, (x, y), fontsize=6, xytext=(3, 3), textcoords="offset points")
     lim = [0, max(0.05, ax.get_xlim()[1], ax.get_ylim()[1])]
     ax.plot(lim, lim, color="grey", ls="--", lw=1)
-    ax.set_xlabel("mean visual decodability (R²)")
+    ax.set_xlabel("mean visual decodability — low+high (R²)")
     ax.set_ylabel("mean semantic decodability (R²)")
-    ax.set_title("What does each model encode — visual vs semantic?")
+    ax.set_title("What does each model encode — visual (low+high) vs semantic?")
     handles = [plt.Line2D([], [], marker="o", ls="", color=MOD_COLOR[m], label=m)
                for m in MOD_COLOR]
     ax.legend(handles=handles, title="modality"); ax.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, "probe_visual_vs_semantic.png")
+    IC.savefig(fig, "attribute_probing/probe_visual_vs_semantic.png")
 
 
 def plot_vs_scale(results, kinds):
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7), squeeze=False)
-    for ax, kind in zip(axes[0], ["visual", "semantic"]):
+    tiers = [t for t in TIERS if (kinds == t).any()]
+    fig, axes = plt.subplots(1, len(tiers), figsize=(7 * len(tiers), 6.5), squeeze=False)
+    for ax, kind in zip(axes[0], tiers):
         cols = np.where(kinds == kind)[0]
         for k, r in results.items():
             p = r["params"]
@@ -253,10 +261,10 @@ def plot_vs_scale(results, kinds):
                        edgecolor="black", lw=0.4)
             ax.annotate(k, (np.log10(p), y), fontsize=5, xytext=(3, 3),
                         textcoords="offset points")
-        ax.set_xlabel("log10 #params (M)"); ax.set_ylabel(f"mean {kind} R²")
-        ax.set_title(f"{kind.capitalize()} decodability vs scale"); ax.grid(alpha=0.3)
+        ax.set_xlabel("log10 #params (M)"); ax.set_ylabel(f"mean {TIER_LABEL[kind]} R²")
+        ax.set_title(f"{TIER_LABEL[kind]} decodability vs scale"); ax.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, "probe_vs_scale.png")
+    IC.savefig(fig, "attribute_probing/probe_vs_scale.png")
 
 
 def save(results, names, kinds, eeg_ref):
@@ -269,7 +277,7 @@ def save(results, names, kinds, eeg_ref):
         flat[f"{k}__scores"] = results[k]["scores"]
         flat[f"{k}__rel"] = results[k]["rel"]
         flat[f"{k}__baseline"] = results[k]["baseline"]
-    IC.save_npz(f"attribute_probing__{eeg_ref}.npz", **flat)
+    IC.save_npz(f"attribute_probing/attribute_probing__{eeg_ref}.npz", **flat)
 
 
 def main():
@@ -281,6 +289,8 @@ def main():
     ap.add_argument("--n-layers", type=int, default=8,
                     help="number of (evenly spaced) layers probed per model.")
     ap.add_argument("--folds", type=int, default=5)
+    ap.add_argument("--smoke", action="store_true",
+                    help="use the Component-1 __smoke feature cache (few windows).")
     ap.add_argument("--hf-token", default=None)
     args = ap.parse_args()
     run(args)

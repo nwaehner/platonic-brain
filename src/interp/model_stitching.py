@@ -70,7 +70,7 @@ def load_spec(sp):
     if sp["kind"] == "vision":
         e = IC.try_load_emb(C.VISION[sp["name"]]["path"](sp["size"], sp["vis_family"]))
     else:
-        e = IC.try_load_emb(C.llm_path(sp["llm_dir"], sp["size"]))
+        e = IC.load_llm_grid(sp["llm_dir"], sp["size"])    # triniborrell (nitrox639 lacks most)
     if e is None:
         return None
     return e[None] if e.ndim == 2 else e
@@ -200,7 +200,7 @@ def plot_matrix(keys, rows, mods):
         ax.set_title(title)
     fig.suptitle("Model stitching: predict one latent space from another", y=1.0)
     fig.tight_layout()
-    IC.savefig(fig, "stitching_matrix.png")
+    IC.savefig(fig, "model_stitching/stitching_matrix.png")
 
 
 def plot_proc_vs_lin(rows):
@@ -219,22 +219,22 @@ def plot_proc_vs_lin(rows):
     ax.set_title("Rotation-only vs free-linear stitching (▲ = cross-modal pair)")
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, "stitching_proc_vs_lin.png")
+    IC.savefig(fig, "model_stitching/stitching_proc_vs_lin.png")
 
 
 def plot_vs_mknn(rows):
     fig, ax = plt.subplots(figsize=(11, 9))
     for r in rows:
         cross = r["mod_a"] != r["mod_b"]
-        ax.scatter(r["mknn"], r["lin_r2"], s=55,
+        ax.scatter(r["lin_r2"], r["mknn"], s=55,
                    color="black" if cross else MOD_COLOR[r["mod_a"]],
                    marker="^" if cross else "o", edgecolor="black", lw=0.4, alpha=0.8)
-    ax.set_xlabel("max mKNN (neighbour-overlap alignment)")
-    ax.set_ylabel("ridge stitching R²")
-    ax.set_title("Do mKNN and stitching agree on which models align? (▲ = cross-modal)")
+    ax.set_xlabel("ridge stitching R²")
+    ax.set_ylabel("max mKNN (neighbour-overlap alignment)")
+    ax.set_title("Do stitching and mKNN agree on which models align? (▲ = cross-modal)")
     ax.grid(alpha=0.3)
     fig.tight_layout()
-    IC.savefig(fig, "stitching_vs_mknn.png")
+    IC.savefig(fig, "model_stitching/stitching_vs_mknn.png")
 
 
 def plot_layer_heatmap(embs, nns, args, max_per_axis=8):
@@ -259,11 +259,11 @@ def plot_layer_heatmap(embs, nns, args, max_per_axis=8):
     fig.colorbar(im, ax=ax, fraction=0.045).set_label("ridge R²")
     ax.set_title(f"Layer×layer stitching: {a} → {b}")
     fig.tight_layout()
-    IC.savefig(fig, "stitching_layer_heatmap.png")
+    IC.savefig(fig, "model_stitching/stitching_layer_heatmap.png")
 
 
 def save(keys, rows, eeg_ref):
-    IC.save_npz(f"model_stitching__{eeg_ref}.npz",
+    IC.save_npz(f"model_stitching/model_stitching__{eeg_ref}.npz",
                 keys=np.array(keys),
                 pairs=np.array([(r["a"], r["b"]) for r in rows]),
                 la=np.array([r["la"] for r in rows]),
