@@ -48,5 +48,8 @@ transformers>=4.49
 # semantic tier — validated lexical categories
 empath
 
+# caption-semantic sentiment (feature_gridsearch.py grid search; VADER compound score)
+vaderSentiment
+
 # embedding / caption download
 huggingface_hub
