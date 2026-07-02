@@ -12,6 +12,12 @@ Outputs land under src/interp/outputs/{features,enrichment,probing,caption_sim}/
 
 from __future__ import annotations
 
+# bootstrap: add all study subdirs to sys.path so cross-group imports work
+import sys as _sys; from pathlib import Path as _Path
+_INTERP = _Path(__file__).resolve().parent
+for _d in [p for p in _INTERP.iterdir() if p.is_dir() and p.name[0] not in "._o"]:
+    if str(_d) not in _sys.path: _sys.path.insert(0, str(_d))
+
 import argparse
 import traceback
 

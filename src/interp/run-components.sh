@@ -21,13 +21,13 @@ if [ "${1:-}" = "--smoke" ]; then
 fi
 
 echo "===== Component 1: feature stacks (all grids) ====="
-"$PY" src/interp/interp_features.py --grid all
+"$PY" src/interp/components/interp_features.py --grid all
 echo "===== Component 2: neighbourhood variance ratio ====="
-"$PY" src/interp/neighbour_enrichment.py
+"$PY" src/interp/components/neighbour_enrichment.py
 echo "===== Component 3: feature linear-probing (EEG↔vision) ====="
-"$PY" src/interp/feature_linear_probing.py
+"$PY" src/interp/components/feature_linear_probing.py
 echo "===== Component 5: vision↔language probing (4 s) ====="
-"$PY" src/interp/vis_lang_probing.py
+"$PY" src/interp/components/vis_lang_probing.py
 echo "===== Component 4: caption variance ratio ====="
-"$PY" src/interp/caption_similarity.py
+"$PY" src/interp/components/caption_similarity.py
 echo "===== Components 1–5 done. Outputs in src/interp/outputs/ ====="

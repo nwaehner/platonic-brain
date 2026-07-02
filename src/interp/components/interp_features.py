@@ -26,6 +26,12 @@ Usage:
 
 from __future__ import annotations
 
+# bootstrap: add interp root + all study subdirs to sys.path
+import sys as _sys; from pathlib import Path as _Path
+_INTERP = _Path(__file__).resolve().parent.parent
+for _d in ([_INTERP] + [p for p in _INTERP.iterdir() if p.is_dir() and p.name[0] not in "._o"]):
+    if str(_d) not in _sys.path: _sys.path.insert(0, str(_d))
+
 import argparse
 import re
 

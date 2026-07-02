@@ -17,7 +17,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.stats import spearmanr
 
-OUT = Path(__file__).resolve().parent / "outputs" / "eeg_alignment"
+OUT = Path(__file__).resolve().parent.parent / "outputs" / "eeg_alignment"
 FAM_COLORS = {"femba": "#1b9e77", "luna": "#d95f02", "neurolm": "#7570b3",
               "reve": "#e7298a", "steegformer": "#66a61e"}
 FAM_MARKERS = {"femba": "o", "luna": "s", "neurolm": "^", "reve": "D", "steegformer": "P"}
