@@ -4,6 +4,9 @@
 
 !.gitignore
 !README.md
+!RESULTS.md
+!figures/
+!figures/**
 !requirements.txt
 !setup.sh
 !notebooks/
