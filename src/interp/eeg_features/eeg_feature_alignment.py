@@ -51,15 +51,29 @@ FAM_COLORS = {"femba": "#1b9e77", "luna": "#d95f02", "neurolm": "#7570b3",
 FAM_MARKERS = {"femba": "o", "luna": "s", "neurolm": "^", "reve": "D", "steegformer": "P"}
 
 
-def eeg_variants():
+_SMOKE_EEG = [("reve", "base"), ("neurolm", "b"), ("femba", "base")]
+
+
+def eeg_variants(smoke=False):
+    if smoke:
+        return _SMOKE_EEG
     return [(m, s) for m in C.EEG for s in C.EEG[m]["sizes"]]
 
 
 def load_eeg_feat(model):
-    p = EEGFEAT / f"{model}__eegfeat.npz"
-    if not p.exists():
-        return None, None
-    z = np.load(p, allow_pickle=True)
+    local = EEGFEAT / f"{model}__eegfeat.npz"
+    if local.exists():
+        z = np.load(local, allow_pickle=True)
+    else:
+        try:
+            from huggingface_hub import hf_hub_download
+            dl = hf_hub_download(IC.REPO_4S, f"eeg_features/{model}__eegfeat.npz",
+                                 repo_type="dataset", token=C.HF_TOKEN_CACHE)
+            z = np.load(dl, allow_pickle=True)
+            print(f"  [{model}] loaded features from HuggingFace")
+        except Exception as e:
+            print(f"  [skip] no local or HF features for grid {model}: {e}")
+            return None, None
     return z["feat"].astype(np.float64), list(z["feat_names"])
 
 
@@ -119,12 +133,16 @@ def main():
     ap = argparse.ArgumentParser(description="EEG cross-arch alignment vs NICE-feature decodability.")
     ap.add_argument("--k", type=int, default=C.K_MKNN_DEFAULT)
     ap.add_argument("--folds", type=int, default=5)
+    ap.add_argument("--smoke", action="store_true",
+                    help="quick smoke test: 3 EEG models (reve-base, neurolm-b, femba-base)")
     ap.add_argument("--hf-token", default=None)
     args = ap.parse_args()
     IC.set_token(args.hf_token)
     OUT.mkdir(parents=True, exist_ok=True)
+    if args.smoke:
+        print("=== SMOKE MODE: 3 EEG models ===")
 
-    variants = eeg_variants()
+    variants = eeg_variants(args.smoke)
     # ── load embeddings (native + common grid), decodability, grams/knn ───────────
     models, names = [], None
     common, knn, grams, perf = {}, {}, {}, {}

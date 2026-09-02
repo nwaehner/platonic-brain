@@ -646,6 +646,13 @@ def load_eeg_emb(model, size):
     return None if emb is None else emb.mean(axis=2)
 
 
+def load_eeg_emb_subjects(model, size):
+    """Per-SUBJECT EEG embedding (L, W, S, D) — the same array `load_eeg_emb` averages,
+    with the subject axis kept. Needed by the nested subject × time CV, which must never
+    put a subject in both train and test (see feature_gridsearch.nested_ridge_r2)."""
+    return try_load_emb(C.EEG[model]["fname"](size))
+
+
 def load_vision_grid(arch, size, family):
     """Vision embedding (L, W, D). family='clip4s' → 4 s repo; else EEG-grid (nitrox639)."""
     path = C.VISION[arch]["path"](size, family)
