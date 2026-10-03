@@ -154,6 +154,9 @@ def main():
                     help="Subset of sub-000X to process (default: all 6).")
     ap.add_argument("--out-dir", default=str(_PROJECT_ROOT / "embeddings" / "fmri"))
     ap.add_argument("--data-repo", default=HF_DATASET_REPO)
+    ap.add_argument("--tar-dir", default=None,
+                    help="Read <tar-dir>/<subject>/fMRI_preprocessed_data.tar from disk "
+                         "instead of downloading (e.g. a prior snapshot_download into data/).")
     ap.add_argument("--hf-token", default=None)
     ap.add_argument("--verify-only", action="store_true",
                     help="Index the tar and report the TR-id inventory; do not build/save.")
@@ -170,10 +173,18 @@ def main():
             print(f"[{subject}] exists, skipping ({out}). Use --overwrite to redo.")
             continue
 
-        print(f"[{subject}] downloading fMRI_preprocessed_data.tar (~4 GB, cached)...")
-        tar_path = Path(hf_hub_download(
-            args.data_repo, f"{subject}/fMRI_preprocessed_data.tar",
-            repo_type="dataset", token=token))
+        if args.tar_dir:
+            tar_path = Path(args.tar_dir) / subject / "fMRI_preprocessed_data.tar"
+            if not tar_path.exists():
+                print(f"[{subject}] no local tar at {tar_path} — skipping.")
+                continue
+            print(f"[{subject}] using local tar {tar_path} "
+                  f"({tar_path.stat().st_size/1e9:.2f} GB)")
+        else:
+            print(f"[{subject}] downloading fMRI_preprocessed_data.tar (~4 GB, cached)...")
+            tar_path = Path(hf_hub_download(
+                args.data_repo, f"{subject}/fMRI_preprocessed_data.tar",
+                repo_type="dataset", token=token))
 
         print(f"[{subject}] indexing tar members...")
         idx = index_tar(tar_path)
