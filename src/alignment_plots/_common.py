@@ -75,7 +75,7 @@ plt.rcParams.update(
 
 
 # ── HuggingFace auth ───────────────────────────────────────────────────────────
-REPO = "nitrox639/platonic-embeddings"
+REPO = "nicolaswaehner/platonic-embeddings"
 # Writable dataset for the embeddings WE generate (llms/ + the clip4s vision/). Defaults
 # to REPO; set PLATONIC_LLM_REPO (e.g. in .env) to redirect them to your own dataset —
 # needed when REPO is read-only for your token. The pre-existing eeg/ and the EEG-family
